@@ -1,0 +1,21 @@
+{
+    "gemini_search": {
+      "url": "YOUR_URL_HERE",
+      "ak": "YOUR_API_KEY_HERE",
+      "log_id": "temp_user",
+      "model": "gemini-2.5-pro-preview-05-06",
+      "timeout": 300
+    },
+    "encoding": {
+      "name": "cl100k_base"
+    },
+    "cache": {
+      "default_path": ".cache_temp.pkl",
+      "enable": true,
+      "ttl": 3600
+    },
+    "logging": {
+      "level": "INFO",
+      "file": "temp.log"
+    }
+  }
