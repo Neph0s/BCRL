@@ -155,7 +155,7 @@ def cached(func):
 					logger.error(f'Error loading cache from {cache_path}')
 					cache = {}
 
-		if (cache_sign and key in cache) and not (cache[key] is None):
+		if False: #(cache_sign and key in cache) and not (cache[key] is None):
 			return cache[key]
 		else:		
 			result = func(*args, **kwargs)
@@ -180,7 +180,7 @@ def num_tokens_from_string(string: str, encoding_name: str = "cl100k_base") -> i
 	logger.info(f"Number of tokens: {num_tokens}")
 	return num_tokens
 
-def gemini_search(messages):
+def gemini(messages, search=False):
 	"""使用现有的gemini search API"""
 	# 从配置文件获取API配置
 	gemini_config = config['gemini_search']
@@ -204,12 +204,14 @@ def gemini_search(messages):
 			"include_thoughts": True
 		},
 		"stream": False,
-		"tools": [
+	}
+
+	if search:
+		data['tools'] = [
 			{
 				"type": "google_search"
 			}
 		]
-	}
 	
 	try:
 		response = requests.post(
@@ -219,12 +221,80 @@ def gemini_search(messages):
 			json=data,
 			timeout=gemini_config['timeout']
 		)
-		return response.json()
+
+		return response.json()['choices'][0]['message']['content']
 			
 	except Exception as e:
 		print(f"请求失败: {e}")
 		return None
 
+def claude(messages):
+	"""使用现有的claude API"""
+	# 从配置文件获取API配置
+	claude_config = config['claude']
+	
+	# 请求数据
+	client = openai.AzureOpenAI(
+        azure_endpoint=claude_config['url'],
+        api_version=claude_config['api_version'],
+        api_key=claude_config['ak'],
+    )
+
+	try:
+		response = client.chat.completions.create(
+			model=claude_config['model'],
+			messages=messages, 
+			extra_headers={"X-TT-LOGID": claude_config['log_id']},  
+			#如果改模型需要thinking
+			max_tokens=4096,
+			extra_body={
+				"thinking": {
+					"type": "enabled",
+					"budget_tokens": 2000,
+				}
+			}
+		)
+
+		return response.choices[0].message.content
+			
+	except Exception as e:
+		time.sleep(30)
+		print(f"请求失败: {e}")
+		return None
+
+def gpt(messages):
+	"""使用现有的claude API"""
+	# 从配置文件获取API配置
+	gpt_config = config['gpt']
+	
+	# 请求数据
+	client = openai.AzureOpenAI(
+        azure_endpoint=gpt_config['url'],
+        api_version=gpt_config['api_version'],
+        api_key=gpt_config['ak'],
+    )
+
+	try:
+		response = client.chat.completions.create(
+			model=gpt_config['model'],
+			messages=messages, 
+			extra_headers={"X-TT-LOGID": gpt_config['log_id']},  
+			#如果改模型需要thinking
+			max_tokens=4096,
+			extra_body={
+				"thinking": {
+					"type": "enabled",
+					"budget_tokens": 2000,
+				}
+			}
+		)
+		import pdb; pdb.set_trace()
+		return response.choices[0].message.content
+			
+	except Exception as e:
+		print(f"请求失败: {e}")
+		return None
+	
 def deer_flow(messages):
 	"""使用deer-flow API（假设本地运行）"""
 	# 从配置文件获取deer-flow配置
@@ -273,7 +343,13 @@ def _get_response(model, messages, nth_generation=0, **kwargs):
 
 	try:
 		if model == 'gemini_search': 
-			response = gemini_search(messages)
+			response = gemini(messages, search=True)
+		elif model == 'gemini':
+			response = gemini(messages)
+		elif model == 'claude-4-sonnet':
+			response = claude(messages)
+		elif model.startswith('gpt'):
+			response = gpt(messages)
 		elif model == 'deer-flow':
 			pass
 		
