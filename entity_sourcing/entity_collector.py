@@ -14,11 +14,13 @@ from qrank_loader import QRankLoader
 
 
 class WikidataEntityCollector:
-    def __init__(self, language='en', qrank_csv_file='qrank.csv'):
+    def __init__(self, language='en', qrank_csv_file='qrank.csv', major_sample_size=2000, minor_sample_size=100):
         self.sparql_endpoint = "https://query.wikidata.org/sparql"
         self.qrank_data = {}
         self.language = language  # Support for different languages
         self.qrank_loader = QRankLoader(csv_file=qrank_csv_file)
+        self.major_sample_size = major_sample_size
+        self.minor_sample_size = minor_sample_size
         
     def load_qrank_data(self) -> Dict[str, float]:
         """Load QRank popularity data using optimized loader."""
@@ -39,20 +41,9 @@ class WikidataEntityCollector:
             type_constraint = f"?item wdt:P31 wd:{instance_of} ."
             query_desc = f"instances of {instance_of}"
         else:
-            # For mixed entities, use a more specific approach to avoid timeout
-            # Sample from multiple common types rather than all possible types
-            type_constraint = """
-            {
-              { ?item wdt:P31 wd:Q5 } UNION          # humans
-              { ?item wdt:P31 wd:Q515 } UNION        # cities  
-              { ?item wdt:P31 wd:Q571 } UNION        # books
-              { ?item wdt:P31 wd:Q11424 } UNION      # films
-              { ?item wdt:P31 wd:Q783794 } UNION     # companies
-              { ?item wdt:P31 wd:Q95074 } UNION      # fictional characters
-              { ?item wdt:P31 wd:Q7366 } UNION       # songs
-              { ?item wdt:P31 wd:Q3918 }             # universities
-            }"""
-            query_desc = "mixed entity types (sampled)"
+            # For random sampling without type constraint, use offset-based sampling
+            # This avoids complex UNION queries that timeout
+            return self._sample_random_entities(limit)
         
         query = f"""
         SELECT DISTINCT ?item ?itemLabel ?itemDescription WHERE {{
@@ -102,6 +93,107 @@ class WikidataEntityCollector:
             print(f"Error querying Wikidata: {e}")
             return []
     
+    def _sample_random_entities(self, limit: int) -> List[Dict]:
+        """
+        Sample random entities from Wikidata efficiently using multiple small queries
+        """
+        import random
+        
+        print(f"Sampling {limit} random entities from multiple categories...")
+        
+        # List of common entity types for sampling
+        sample_types = [
+            ("Q515", "cities"),
+            ("Q571", "books"), 
+            ("Q11424", "films"),
+            ("Q783794", "companies"),
+            ("Q95074", "fictional characters"),
+            ("Q7366", "songs"),
+            ("Q3918", "universities"),
+            ("Q33506", "museums"),
+            ("Q215380", "musical groups"),
+            ("Q5398426", "TV series"),
+            ("Q7889", "video games"),
+            ("Q482994", "albums"),
+            ("Q838948", "artworks"),
+            ("Q132241", "festivals"),
+            ("Q618779", "awards")
+        ]
+        
+        all_entities = []
+        entities_per_type = max(1, (limit // len(sample_types)) + 1)
+        
+        # Shuffle types for randomness
+        random.shuffle(sample_types)
+        
+        for type_id, type_name in sample_types:
+            if len(all_entities) >= limit:
+                break
+                
+            try:
+                # Use small queries with random offset
+                offset = random.randint(0, 100)  # Random starting point
+                query = f"""
+                SELECT DISTINCT ?item ?itemLabel ?itemDescription WHERE {{
+                  ?item wdt:P31 wd:{type_id} .
+                  ?item rdfs:label ?itemLabel .
+                  FILTER(LANG(?itemLabel) = "{self.language}")
+                  OPTIONAL {{ ?item schema:description ?itemDescription . FILTER(LANG(?itemDescription) = "{self.language}") }}
+                  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "{self.language}" }}
+                }}
+                OFFSET {offset}
+                LIMIT {entities_per_type}
+                """
+                
+                headers = {
+                    'Accept': 'application/sparql-results+json',
+                    'User-Agent': 'EntityCollector/1.0 (https://example.com/contact)'
+                }
+                
+                response = requests.get(
+                    self.sparql_endpoint,
+                    params={'query': query, 'format': 'json'},
+                    headers=headers,
+                    timeout=30
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                for binding in data['results']['bindings']:
+                    if len(all_entities) >= limit:
+                        break
+                        
+                    entity_uri = binding['item']['value']
+                    entity_id = entity_uri.split('/')[-1]
+                    
+                    entity = {
+                        'id': entity_id,
+                        'uri': entity_uri,
+                        'label': binding.get('itemLabel', {}).get('value', ''),
+                        'description': binding.get('itemDescription', {}).get('value', ''),
+                        'sampled_from': type_name
+                    }
+                    all_entities.append(entity)
+                
+                print(f"  Sampled {len(data['results']['bindings'])} {type_name}")
+                
+                # Small delay between queries
+                time.sleep(0.5)
+                
+            except Exception as e:
+                print(f"  Error sampling {type_name}: {e}")
+                continue
+        
+        # Shuffle final results for randomness
+        random.shuffle(all_entities)
+        
+        # Trim to exact limit
+        final_entities = all_entities[:limit]
+        
+        print(f"Successfully sampled {len(final_entities)} random entities")
+        return final_entities
+    
     def add_popularity_scores(self, entities: List[Dict]) -> List[Dict]:
         """Add QRank popularity scores to entities."""
         if not self.qrank_data:
@@ -124,21 +216,31 @@ class WikidataEntityCollector:
         
         return scored_entities
     
-    def collect_entities(self, categories: List[Tuple[str, str]], limit_per_category: int = 500) -> pd.DataFrame:
+    def collect_entities(self, categories: List[Tuple[str, str, str]], limit_per_category: int = 500) -> pd.DataFrame:
         """
         Collect entities from multiple categories with popularity scoring.
         
         Args:
-            categories: List of (category_name, wikidata_id) tuples
-            limit_per_category: Max entities per category
+            categories: List of (category_name, wikidata_id, category_type) tuples
+                       category_type should be 'major' or 'minor'
+            limit_per_category: Max entities per category (overridden by major/minor settings)
         """
         all_entities = []
         
-        for category_name, wikidata_id in categories:
+        for category_name, wikidata_id, category_type in categories:
             id_display = wikidata_id if wikidata_id else "No Type Constraint"
-            print(f"\n--- Processing category: {category_name} ({id_display}) ---")
             
-            entities = self.query_wikidata_entities(wikidata_id, limit_per_category)
+            # Determine sample size based on category type
+            if category_type == 'major':
+                sample_size = self.major_sample_size
+            elif category_type == 'minor':
+                sample_size = self.minor_sample_size
+            else:
+                sample_size = limit_per_category
+            
+            print(f"\n--- Processing {category_type} category: {category_name} ({id_display}) - {sample_size} entities ---")
+            
+            entities = self.query_wikidata_entities(wikidata_id, sample_size)
             
             if entities:
                 scored_entities = self.add_popularity_scores(entities)
@@ -147,6 +249,7 @@ class WikidataEntityCollector:
                 for entity in scored_entities:
                     entity['category'] = category_name
                     entity['category_id'] = wikidata_id
+                    entity['category_type'] = category_type
                 
                 all_entities.extend(scored_entities)
                 
@@ -181,65 +284,77 @@ class WikidataEntityCollector:
 
 
 def main():
-    """Main function to demonstrate entity collection."""
-    # Test both English and Chinese with local QRank CSV
+    """Main function to demonstrate entity collection with major/minor categories."""
+    # Test both English and Chinese with enhanced sampling
     collectors = {
-        'en': WikidataEntityCollector(language='en', qrank_csv_file='qrank.csv'),
-        'zh': WikidataEntityCollector(language='zh', qrank_csv_file='qrank.csv')
+        'en': WikidataEntityCollector(language='en', qrank_csv_file='qrank.csv', major_sample_size=100, minor_sample_size=40),
+        'zh': WikidataEntityCollector(language='zh', qrank_csv_file='qrank.csv', major_sample_size=100, minor_sample_size=40)
     }
     
-    # Expanded categories including places, events, works, and organizations
+    # Enhanced categories with major/minor classification
     categories = [
-        # People
-        ("Fictional Characters", "Q95074"),   # Fictional character
-        ("Musicians", "Q639669"),             # Musician
-        ("Politicians", "Q82955"),            # Politician
-        ("Athletes", "Q2066131"),             # Athlete
-        ("Scientists", "Q901"),               # Scientist
-        ("Actors", "Q33999"),                 # Actor
-        ("Writers", "Q36180"),                # Writer
+        # People (Major category - high diversity and research value)
+        ("People - Humans", "Q5", "major"),                      # Human
+        ("People - Fictional Characters", "Q95074", "major"),    # Fictional character
+        ("People - Historical Figures", "Q5774265", "major"),     # Historical figure
+        ("People - Musicians", "Q639669", "minor"),              # Musician
+        ("People - Politicians", "Q82955", "minor"),             # Politician
+        ("People - Athletes", "Q2066131", "minor"),              # Athlete
+        ("People - Scientists", "Q901", "minor"),                # Scientist
+        ("People - Actors", "Q33999", "minor"),                  # Actor
+        ("People - Writers", "Q36180", "minor"),                 # Writer
+        ("People - Artists", "Q483501", "minor"),                # Artist
+        ("People - Journalists", "Q1930187", "minor"),           # Journalist
+        ("People - Businesspeople", "Q43845", "minor"),          # Businessperson
+        ("People - Philosophers", "Q4964182", "minor"),          # Philosopher
+        ("People - Inventors", "Q205375", "minor"),              # Inventor
         
-        # Works and Creative Content
-        ("Books", "Q571"),                    # Book
-        ("Films", "Q11424"),                  # Film
-        ("TV Series", "Q5398426"),            # Television series
-        ("Songs", "Q7366"),                   # Song
-        ("Albums", "Q482994"),                # Album
-        ("Video Games", "Q7889"),             # Video game
-        ("Artworks", "Q838948"),              # Work of art
+        # Works and Creative Content (Major category)
+        ("Works - Books", "Q571", "major"),                      # Book
+        ("Works - Films", "Q11424", "major"),                    # Film
+        ("Works - TV Series", "Q5398426", "major"),              # Television series
+        ("Works - Songs", "Q7366", "minor"),                     # Song
+        ("Works - Video Games", "Q7889", "minor"),               # Video game
+        ("Works - Artworks", "Q838948", "minor"),                # Work of art
+        ("Works - Plays", "Q25379", "minor"),                    # Play
+        ("Works - Anime", "Q1107", "major"),                     # Anime
+        ("Works - Comics", "Q1004", "minor"),                    # Comic
         
-        # Places
-        ("Cities", "Q515"),                   # City
-        ("Countries", "Q6256"),               # Country
-        ("Universities", "Q3918"),            # University
-        ("Museums", "Q33506"),                # Museum
-        ("Restaurants", "Q11707"),            # Restaurant
-        ("Hotels", "Q27686"),                 # Hotel
+        # Places (Major category)
+        ("Places - Cities", "Q515", "major"),                    # City
+        ("Places - Universities", "Q3918", "minor"),             # University
+        ("Places - Museums", "Q33506", "minor"),                 # Museum
         
-        # Organizations
-        ("Companies", "Q783794"),             # Company
-        ("NGOs", "Q79913"),                   # Non-governmental organization
-        ("Sports Teams", "Q12973014"),        # Sports team
-        ("Bands", "Q215380"),                 # Musical group
-        ("Political Parties", "Q7278"),       # Political party
+        # Organizations (Major category)
+        ("Organizations - Companies", "Q783794", "major"),       # Company
+        ("Organizations - NGOs", "Q79913", "minor"),             # Non-governmental organization
+        ("Organizations - Sports Teams", "Q12973014", "minor"),  # Sports team
+        ("Organizations - Bands", "Q215380", "minor"),           # Musical group
+        ("Organizations - Schools", "Q3914", "minor"),           # School
+        ("Organizations - Associations", "Q4438121", "minor"),   # Association
         
-        # Events
-        ("Wars", "Q198"),                     # War
-        ("Competitions", "Q476300"),          # Competition
-        ("Festivals", "Q132241"),             # Festival
-        ("Conferences", "Q2020153"),          # Academic conference
+        # Events (Minor category)
+        ("Events - Wars", "Q198", "minor"),                      # War
+        ("Events - Competitions", "Q476300", "minor"),           # Competition
+        ("Events - Disasters", "Q3839081", "minor"),             # Disaster
         
-        # Miscellaneous
-        ("Awards", "Q618779"),                # Award
-        ("Languages", "Q34770"),              # Language
-        ("Diseases", "Q12136"),               # Disease
-        ("Software", "Q7397"),                # Software
+        # # Science & Technology (Minor category)
+        # ("Science - Diseases", "Q12136", "minor"),               # Disease
+        # ("Science - Software", "Q7397", "minor"),                # Software
+        # ("Science - Chemical Compounds", "Q11173", "minor"),     # Chemical compound
+        # ("Science - Inventions", "Q15401930", "minor"),          # Invention
+        # ("Science - Theories", "Q17737", "minor"),               # Theory
+        # ("Science - Experiments", "Q33147", "minor"),            # Experiment
         
-        # Experimental: No type constraint
-        ("Mixed Entities (No Type)", None),   # No P31 constraint
+        # Culture & Society (Minor category)
+        ("Culture - Cuisines", "Q1968435", "minor"),             # Cuisine
+        
+        # Experimental: Mixed sampling (Special category)
+        ("Mixed Entities (No Type)", None, "major"),             # No P31 constraint
     ]
 
-    categories = categories[-2:-1]
+    # Use only mixed entities for demonstration
+    categories = categories[-1:]
     
     # Collect entities for both languages
     for lang_code, collector in collectors.items():
