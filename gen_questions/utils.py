@@ -155,7 +155,7 @@ def cached(func):
 					logger.error(f'Error loading cache from {cache_path}')
 					cache = {}
 
-		if False: #(cache_sign and key in cache) and not (cache[key] is None):
+		if (cache_sign and key in cache) and not (cache[key] is None):
 			return cache[key]
 		else:		
 			result = func(*args, **kwargs)
@@ -235,10 +235,10 @@ def claude(messages):
 	
 	# 请求数据
 	client = openai.AzureOpenAI(
-        azure_endpoint=claude_config['url'],
-        api_version=claude_config['api_version'],
-        api_key=claude_config['ak'],
-    )
+		azure_endpoint=claude_config['url'],
+		api_version=claude_config['api_version'],
+		api_key=claude_config['ak'],
+	)
 
 	try:
 		response = client.chat.completions.create(
@@ -269,10 +269,10 @@ def gpt(messages):
 	
 	# 请求数据
 	client = openai.AzureOpenAI(
-        azure_endpoint=gpt_config['url'],
-        api_version=gpt_config['api_version'],
-        api_key=gpt_config['ak'],
-    )
+		azure_endpoint=gpt_config['url'],
+		api_version=gpt_config['api_version'],
+		api_key=gpt_config['ak'],
+	)
 
 	try:
 		response = client.chat.completions.create(
@@ -373,7 +373,7 @@ def _get_response(model, messages, nth_generation=0, **kwargs):
 		traceback.print_exc()
 		return None
 
-def get_response(**kwargs):
+def get_response(post_processing_funcs=[], **kwargs):
 	nth_generation = 0
 
 	while True:
@@ -381,131 +381,193 @@ def get_response(**kwargs):
 		response = _get_response(**kwargs, nth_generation=nth_generation)
 		logger.info(f'response by LLM: {response}')
 
+		if response is None:
+			continue 
+		
 		# Break if we got a valid response, otherwise retry
+		# Run response through post-processing pipeline
+		for i, post_processing_func in enumerate(post_processing_funcs):
+			if response is None:
+				break
+			response = post_processing_func(response, **kwargs)
+
 		if response:
-			break
+			return response
 		else:
 			nth_generation += 1
 			if nth_generation > kwargs.get('max_retry', 5):
 				# Return error response with backup data if parse_response failed
 				return None
 
-	return response
+def ensure_question_format(response, **kwargs):
+	try:
+		assert isinstance(response, dict)
+		assert 'entity' in response 
+		assert 'questions' in response
+		for q in response['questions']:
+			assert isinstance(q, dict)
+			assert 'entity_type' in q
+			
+		return response
+	except:
+		return False
+
 
 def save_result(filename, result):
-    """保存查询结果到文件"""
-    # 创建results目录
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+	"""保存查询结果到文件"""
+	# 创建results目录
+	os.makedirs(os.path.dirname(filename), exist_ok=True)
+	
+	with open(filename, 'w', encoding='utf-8') as f:
+		json.dump(result, f, ensure_ascii=False, indent=2)
 
 def format_json_for_display(data, indent_level=0):
-    """
-    将JSON数据格式化为易读的文本格式
-    """
-    indent = "  " * indent_level
-    lines = []
-    
-    if isinstance(data, dict):
-        if not data:
-            return "{ }"
-        lines.append("{")
-        for i, (key, value) in enumerate(data.items()):
-            formatted_value = format_json_for_display(value, indent_level + 1)
-            comma = "," if i < len(data) - 1 else ""
-            lines.append(f"{indent}  \"{key}\": {formatted_value}{comma}")
-        lines.append(f"{indent}}}")
-        
-    elif isinstance(data, list):
-        if not data:
-            return "[ ]"
-        lines.append("[")
-        for i, item in enumerate(data):
-            formatted_item = format_json_for_display(item, indent_level + 1)
-            comma = "," if i < len(data) - 1 else ""
-            lines.append(f"{indent}  {formatted_item}{comma}")
-        lines.append(f"{indent}]")
-        
-    elif isinstance(data, str):
-        # 处理长字符串，添加换行
-        if len(data) > 80:
-            return f'"{data[:77]}..."'
-        return f'"{data}"'
-        
-    elif isinstance(data, (int, float)):
-        return str(data)
-        
-    elif isinstance(data, bool):
-        return "true" if data else "false"
-        
-    elif data is None:
-        return "null"
-        
-    else:
-        return f'"{str(data)}"'
-    
-    return "\n".join(lines)
+	"""
+	将JSON数据格式化为易读的文本格式
+	"""
+	indent = "  " * indent_level
+	lines = []
+	
+	if isinstance(data, dict):
+		if not data:
+			return "{ }"
+		lines.append("{")
+		for i, (key, value) in enumerate(data.items()):
+			formatted_value = format_json_for_display(value, indent_level + 1)
+			comma = "," if i < len(data) - 1 else ""
+			lines.append(f"{indent}  \"{key}\": {formatted_value}{comma}")
+		lines.append(f"{indent}}}")
+		
+	elif isinstance(data, list):
+		if not data:
+			return "[ ]"
+		lines.append("[")
+		for i, item in enumerate(data):
+			formatted_item = format_json_for_display(item, indent_level + 1)
+			comma = "," if i < len(data) - 1 else ""
+			lines.append(f"{indent}  {formatted_item}{comma}")
+		lines.append(f"{indent}]")
+		
+	elif isinstance(data, str):
+		# 处理长字符串，添加换行
+		if len(data) > 80:
+			return f'"{data[:77]}..."'
+		return f'"{data}"'
+		
+	elif isinstance(data, (int, float)):
+		return str(data)
+		
+	elif isinstance(data, bool):
+		return "true" if data else "false"
+		
+	elif data is None:
+		return "null"
+		
+	else:
+		return f'"{str(data)}"'
+	
+	return "\n".join(lines)
 
 def save_result_txt(filename, results):
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write("=" * 80 + "\n\n")
-        
-        successful_count = 0
-        failed_count = 0
-        
-        for i, (entity, result) in enumerate(results.items(), 1):
-            f.write("┌" + "─" * 78 + "┐\n")
-            
-            if result:
-                successful_count += 1
-                f.write("│ ✅ 状态: 查询成功\n")
-                f.write("├" + "─" * 78 + "┤\n")
-                
-                # 检查result是否为字典或列表，如果是则美化输出
-                if isinstance(result, (dict, list)):
-                    f.write("│ 📋 数据类型: JSON结构\n")
-                    f.write("├" + "─" * 78 + "┤\n")
-                    formatted_json = format_json_for_display(result)
-                    # 为每行添加边框
-                    for line in formatted_json.split('\n'):
-                        f.write(f"│ {line:<76} │\n")
-                else:
-                    # 如果result是字符串但包含JSON，尝试解析并美化
-                    try:
-                        parsed_result = json.loads(result)
-                        f.write("│ 📋 数据类型: 解析后的JSON结构\n")
-                        f.write("├" + "─" * 78 + "┤\n")
-                        formatted_json = format_json_for_display(parsed_result)
-                        for line in formatted_json.split('\n'):
-                            f.write(f"│ {line:<76} │\n")
-                    except (json.JSONDecodeError, TypeError):
-                        # 如果不是JSON格式，直接输出原内容
-                        f.write("│ 📋 数据类型: 文本内容\n")
-                        f.write("├" + "─" * 78 + "┤\n")
-                        # 处理长文本，按行分割
-                        content_lines = str(result).split('\n')
-                        for line in content_lines:
-                            if len(line) > 76:
-                                # 长行需要换行
-                                words = line.split(' ')
-                                current_line = ""
-                                for word in words:
-                                    if len(current_line + " " + word) <= 76:
-                                        current_line += (" " + word) if current_line else word
-                                    else:
-                                        if current_line:
-                                            f.write(f"│ {current_line:<76} │\n")
-                                        current_line = word
-                                if current_line:
-                                    f.write(f"│ {current_line:<76} │\n")
-                            else:
-                                f.write(f"│ {line:<76} │\n")
-            else:
-                failed_count += 1
-                f.write("│ ❌ 状态: 查询失败\n")
-                f.write("├" + "─" * 78 + "┤\n")
-                f.write("│ 💬 原因: 无法获取相关信息" + " " * 51 + "│\n")
-                
-            f.write("└" + "─" * 78 + "┘\n\n")
-        
+	with open(filename, 'w', encoding='utf-8') as f:
+		f.write("=" * 80 + "\n\n")
+		
+		successful_count = 0
+		failed_count = 0
+		
+		for i, (entity, result) in enumerate(results.items(), 1):
+			f.write("┌" + "─" * 78 + "┐\n")
+			
+			if result:
+				successful_count += 1
+				f.write("│ ✅ 状态: 查询成功\n")
+				f.write("├" + "─" * 78 + "┤\n")
+				
+				# 检查result是否为字典或列表，如果是则美化输出
+				if isinstance(result, (dict, list)):
+					f.write("│ 📋 数据类型: JSON结构\n")
+					f.write("├" + "─" * 78 + "┤\n")
+					formatted_json = format_json_for_display(result)
+					# 为每行添加边框
+					for line in formatted_json.split('\n'):
+						f.write(f"│ {line:<76} │\n")
+				else:
+					# 如果result是字符串但包含JSON，尝试解析并美化
+					try:
+						parsed_result = json.loads(result)
+						f.write("│ 📋 数据类型: 解析后的JSON结构\n")
+						f.write("├" + "─" * 78 + "┤\n")
+						formatted_json = format_json_for_display(parsed_result)
+						for line in formatted_json.split('\n'):
+							f.write(f"│ {line:<76} │\n")
+					except (json.JSONDecodeError, TypeError):
+						# 如果不是JSON格式，直接输出原内容
+						f.write("│ 📋 数据类型: 文本内容\n")
+						f.write("├" + "─" * 78 + "┤\n")
+						# 处理长文本，按行分割
+						content_lines = str(result).split('\n')
+						for line in content_lines:
+							if len(line) > 76:
+								# 长行需要换行
+								words = line.split(' ')
+								current_line = ""
+								for word in words:
+									if len(current_line + " " + word) <= 76:
+										current_line += (" " + word) if current_line else word
+									else:
+										if current_line:
+											f.write(f"│ {current_line:<76} │\n")
+										current_line = word
+								if current_line:
+									f.write(f"│ {current_line:<76} │\n")
+							else:
+								f.write(f"│ {line:<76} │\n")
+			else:
+				failed_count += 1
+				f.write("│ ❌ 状态: 查询失败\n")
+				f.write("├" + "─" * 78 + "┤\n")
+				f.write("│ 💬 原因: 无法获取相关信息" + " " * 51 + "│\n")
+				
+			f.write("└" + "─" * 78 + "┘\n\n")
+		
+def extract_json(text, **kwargs):
+	def _extract_json(text):
+		# Use regular expressions to find all content within curly braces
+		orig_text = text
+
+		text = re.sub(r'"([^"\\]*(\\.[^"\\]*)*)"', lambda m: m.group().replace('\n', r'\\n'), text) 
+		
+		#json_objects = re.findall(r'(\{[^{}]*\}|\[[^\[\]]*\])', text, re.DOTALL)
+
+		def parse_json_safely(text):
+			try:
+				result = json.loads(text)
+				return result
+			except json.JSONDecodeError:
+				results = []
+				start = 0
+				while start < len(text):
+					try:
+						obj, end = json.JSONDecoder().raw_decode(text[start:])
+						results.append(obj)
+						start += end
+					except json.JSONDecodeError:
+						start += 1
+				
+				if results:
+					longest_json = max(results, key=lambda x: len(json.dumps(x)))
+					return longest_json
+				else:
+					return None
+		
+		extracted_json = parse_json_safely(text)
+		
+		if extracted_json:
+			return extracted_json
+		else:
+			logger.error('Error parsing response: ', orig_text)
+			return None
+	
+	res = _extract_json(text)
+
+	return res
