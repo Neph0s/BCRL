@@ -18,13 +18,23 @@ A comprehensive system for collecting Wikidata entities with popularity scoring 
 pip install -r requirements_entity_collector.txt
 ```
 
-### 2. Basic Usage
+### 2. Download QRank Data
+Download the QRank popularity dataset:
+```bash
+# Download and extract QRank data (required for popularity scoring)
+wget https://qrank.toolforge.org/download/qrank.csv.gz
+gunzip qrank.csv.gz
+```
+
+**Note**: The qrank.csv file is approximately 2.4GB and contains popularity data for 28+ million Wikidata entities. This file is required for popularity scoring but is not included in the repository due to its size.
+
+### 3. Basic Usage
 ```bash
 # Run demonstration with 50 random Chinese entities
 python demo_usage.py
 ```
 
-### 3. Advanced Usage
+### 4. Advanced Usage
 ```python
 from entity_collector import WikidataEntityCollector
 
@@ -145,7 +155,7 @@ popularity_stats = df.groupby('category')['popularity_score'].agg(['mean', 'medi
 - `entity_collector.py` - Main collection engine with enhanced categories
 - `qrank_loader.py` - Optimized QRank data loader with caching
 - `demo_usage.py` - Demonstration script for random sampling
-- `qrank.csv` - Local QRank popularity data (user provided)
+- `qrank.csv` - QRank popularity data (download separately)
 - `qrank_cache.pkl` - Auto-generated cache for fast loading
 
 ## Dependencies
