@@ -25,42 +25,84 @@ class WikidataEntityCollector:
         """Load QRank popularity data using optimized loader."""
         return self.qrank_loader.load_qrank_data()
     
-    def query_wikidata_entities(self, instance_of: str = None, limit: int = 1000, max_retries: int = 3) -> List[Dict]:
+    def query_wikidata_entities(self, instance_of: str = None, limit: int = 1000, max_retries: int = 3) -> Tuple[List[Dict], List[Dict]]:
         """
         Query Wikidata for entities that are instances of a given type.
         
         Args:
             instance_of: Wikidata ID (e.g., 'Q5' for human, 'Q95074' for fictional character).
                         If None, queries entities without type constraint.
-            limit: Maximum number of entities to retrieve
+            limit: Maximum number of entities to retrieve for each language
+            
+        Returns:
+            Tuple of (english_entities, chinese_entities)
         """
         
-        # Build query based on whether instance_of is specified
-        if instance_of:
-            type_constraint = f"?item wdt:P31 wd:{instance_of} ."
-            query_desc = f"instances of {instance_of}"
-        else:
-            # No type constraint - should not happen now
+        if not instance_of:
             raise ValueError("instance_of cannot be None")
         
-        # For broader coverage, we'll get entities first, then filter for labels
-        query = f"""
-        SELECT DISTINCT ?item WHERE {{
-          {type_constraint}
-        }}
-        LIMIT {limit * 3}
-        """
+        type_constraint = f"?item wdt:P31 wd:{instance_of} ."
+        query_desc = f"instances of {instance_of}"
+        
+        print(f"Querying Wikidata for {query_desc}...")
+        
+        # Query English entities separately
+        english_entities = self._query_entities_by_language(instance_of, 'en', limit, max_retries)
+        
+        # Query Chinese entities separately  
+        chinese_entities = self._query_entities_by_language(instance_of, 'zh', limit, max_retries)
+        
+        print(f"Retrieved {len(english_entities)} English entities, {len(chinese_entities)} Chinese entities")
+        return english_entities, chinese_entities
+    
+    def _build_query(self, instance_of: str, language: str, limit: int) -> str:
+        """Build SPARQL query for a specific language with hard constraints"""
+        if language == 'en':
+            # English mode: must have both label and description
+            return f"""
+            SELECT DISTINCT ?item ?itemLabel_en ?itemDescription_en WHERE {{
+              ?item wdt:P31 wd:{instance_of} .
+              ?item rdfs:label ?itemLabel_en .
+              FILTER(LANG(?itemLabel_en) = "en")
+              ?item schema:description ?itemDescription_en .
+              FILTER(LANG(?itemDescription_en) = "en")
+            }}
+            LIMIT {limit * 2}
+            """
+        else:  # zh
+            # Chinese mode: must have Chinese label, description (Chinese preferred, English fallback)
+            return f"""
+            SELECT DISTINCT ?item ?itemLabel_zh ?itemDescription_zh ?itemDescription_en WHERE {{
+              ?item wdt:P31 wd:{instance_of} .
+              ?item rdfs:label ?itemLabel_zh .
+              FILTER(LANG(?itemLabel_zh) = "zh")
+              OPTIONAL {{
+                ?item schema:description ?itemDescription_zh .
+                FILTER(LANG(?itemDescription_zh) = "zh")
+              }}
+              OPTIONAL {{
+                ?item schema:description ?itemDescription_en .
+                FILTER(LANG(?itemDescription_en) = "en")
+              }}
+              FILTER(BOUND(?itemDescription_zh) || BOUND(?itemDescription_en))
+            }}
+            LIMIT {limit * 2}
+            """
+    
+    def _query_entities_by_language(self, instance_of: str, language: str, limit: int, max_retries: int = 3) -> List[Dict]:
+        """Query entities for a specific language with hard constraint on having labels in that language"""
+        
+        query = self._build_query(instance_of, language, limit)
         
         headers = {
             'Accept': 'application/sparql-results+json',
             'User-Agent': 'EntityCollector/1.0 (https://example.com/contact)'
         }
         
-        print(f"Querying Wikidata for {query_desc}...")
+        entities = []
         
         for attempt in range(max_retries):
             try:
-                # Add longer timeout for large queries
                 timeout = 60 if limit > 500 else 60
                 
                 response = requests.get(
@@ -72,198 +114,104 @@ class WikidataEntityCollector:
                 response.raise_for_status()
                 
                 data = response.json()
-                entity_ids = []
                 
-                # Extract entity IDs
                 for binding in data['results']['bindings']:
                     entity_uri = binding['item']['value']
-                    entity_id = entity_uri.split('/')[-1]  # Extract Q-ID
-                    entity_ids.append(entity_id)
-                
-                # Now get labels and descriptions for these entities
-                english_entities, chinese_entities = self._get_entity_details(entity_ids[:limit])
-                
-                print(f"Retrieved {len(english_entities)} English entities, {len(chinese_entities)} Chinese entities")
-                return english_entities, chinese_entities
-                
-            except requests.exceptions.Timeout:
-                print(f"  Timeout on attempt {attempt + 1}/{max_retries}, reducing limit...")
-                # Reduce limit on timeout and retry
-                limit = max(100, limit // 2)
-                query = f"""
-                SELECT DISTINCT ?item WHERE {{
-                  {type_constraint}
-                }}
-                LIMIT {limit * 3}
-                """
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff
-                    continue
+                    entity_id = entity_uri.split('/')[-1]
                     
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 504:  # Gateway timeout
-                    print(f"  Server timeout on attempt {attempt + 1}/{max_retries}, reducing limit...")
+                    if language == 'en':
+                        label = binding.get('itemLabel_en', {}).get('value', '')
+                        description = binding.get('itemDescription_en', {}).get('value', '')
+                        # Must have both label and description for English
+                        if not (label and description):
+                            continue
+                    else:  # zh
+                        label = binding.get('itemLabel_zh', {}).get('value', '')
+                        description = binding.get('itemDescription_zh', {}).get('value', '')
+                        # Use English description as fallback if Chinese description is missing
+                        if not description:
+                            description = binding.get('itemDescription_en', {}).get('value', '')
+                        # Must have Chinese label and some description
+                        if not (label and description):
+                            continue
+                    
+                    entity = {
+                        'id': entity_id,
+                        'uri': entity_uri,
+                        'label': label,
+                        'description': description,
+                        'language': language
+                    }
+                    entities.append(entity)
+                    
+                    if len(entities) >= limit:
+                        break
+                
+                print(f"  Retrieved {len(entities)} {language.upper()} entities with hard constraint")
+                return entities[:limit]
+                
+            except (requests.exceptions.Timeout, requests.exceptions.HTTPError) as e:
+                if self._handle_query_error(e, attempt, max_retries, language):
+                    # Reduce limit and rebuild query
                     limit = max(100, limit // 2)
-                    query = f"""
-                    SELECT DISTINCT ?item WHERE {{
-                      {type_constraint}
-                    }}
-                    LIMIT {limit * 3}
-                    """
+                    query = self._build_query(instance_of, language, limit)
                     if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
+                        time.sleep(2 ** attempt if isinstance(e, requests.exceptions.Timeout) else 5 * (attempt + 1))
                         continue
-                elif e.response.status_code == 429:  # Too many requests
-                    print(f"  Rate limited on attempt {attempt + 1}/{max_retries}, waiting...")
-                    if attempt < max_retries - 1:
-                        time.sleep(5 * (attempt + 1))  # Longer wait for rate limits
-                        continue
-                print(f"  HTTP Error: {e}")
                 
             except Exception as e:
-                print(f"  Error on attempt {attempt + 1}/{max_retries}: {e}")
+                print(f"  Error on attempt {attempt + 1}/{max_retries} for {language.upper()}: {e}")
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
         
-        print(f"Failed to retrieve entities after {max_retries} attempts")
+        print(f"Failed to retrieve {language.upper()} entities after {max_retries} attempts")
         return []
     
-    def _get_entity_details(self, entity_ids: List[str], max_retries: int = 2) -> Tuple[List[Dict], List[Dict]]:
-        """Get labels and descriptions for a list of entity IDs with retry logic
-        
-        Returns:
-            Tuple of (english_entities, chinese_entities)
-        """
-        if not entity_ids:
-            return [], []
-        
-        # Process in batches to avoid URL length limits
-        batch_size = 50
-        all_english_entities = []
-        all_chinese_entities = []
-        
-        for i in range(0, len(entity_ids), batch_size):
-            batch_ids = entity_ids[i:i + batch_size]
-            values_clause = " ".join([f"wd:{entity_id}" for entity_id in batch_ids])
-            
-            # Always get both English and Chinese data
-            query = f"""
-            SELECT DISTINCT ?item ?itemLabel_en ?itemDescription_en ?itemLabel_zh ?itemDescription_zh WHERE {{
-              VALUES ?item {{ {values_clause} }}
-              OPTIONAL {{
-                ?item rdfs:label ?itemLabel_en .
-                FILTER(LANG(?itemLabel_en) = "en")
-              }}
-              OPTIONAL {{
-                ?item schema:description ?itemDescription_en .
-                FILTER(LANG(?itemDescription_en) = "en")
-              }}
-              OPTIONAL {{
-                ?item rdfs:label ?itemLabel_zh .
-                FILTER(LANG(?itemLabel_zh) = "zh")
-              }}
-              OPTIONAL {{
-                ?item schema:description ?itemDescription_zh .
-                FILTER(LANG(?itemDescription_zh) = "zh")
-              }}
-            }}
-            """
-            
-            headers = {
-                'Accept': 'application/sparql-results+json',
-                'User-Agent': 'EntityCollector/1.0 (https://example.com/contact)'
-            }
-            
-            # Retry logic for each batch
-            batch_english_entities = []
-            batch_chinese_entities = []
-            for attempt in range(max_retries):
-                try:
-                    response = requests.get(
-                        self.sparql_endpoint,
-                        params={'query': query, 'format': 'json'},
-                        headers=headers,
-                        timeout=30
-                    )
-                    response.raise_for_status()
-                    
-                    data = response.json()
-                    
-                    for binding in data['results']['bindings']:
-                        entity_uri = binding['item']['value']
-                        entity_id = entity_uri.split('/')[-1]
-                        
-                        # Get English data
-                        en_label = binding.get('itemLabel_en', {}).get('value', '')
-                        en_description = binding.get('itemDescription_en', {}).get('value', '')
-                        
-                        # Get Chinese data
-                        zh_label = binding.get('itemLabel_zh', {}).get('value', '')
-                        zh_description = binding.get('itemDescription_zh', {}).get('value', '')
-                        
-                        # Create entities for each language with fallback logic
-                        for lang in ['en', 'zh']:
-                            if lang == 'en':
-                                label = en_label
-                                description = en_description
-                                target_list = batch_english_entities
-                            else:  # zh
-                                label = zh_label
-                                # Use English description as fallback if Chinese description is missing
-                                description = zh_description or en_description
-                                target_list = batch_chinese_entities
-                            
-                            # Only create entity if has label for this language
-                            if label:
-                                entity = {
-                                    'id': entity_id,
-                                    'uri': entity_uri,
-                                    'label': label,
-                                    'description': description,
-                                    'language': lang
-                                }
-                                target_list.append(entity)
-                    
-                    break  # Success, exit retry loop
-                    
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        print(f"  Retry {attempt + 1} for entity details batch...")
-                        time.sleep(1)
-                        continue
-                    else:
-                        print(f"  Failed to get entity details for batch: {e}")
-                        # Fallback: return empty lists
-                        batch_english_entities = []
-                        batch_chinese_entities = []
-            
-            all_english_entities.extend(batch_english_entities)
-            all_chinese_entities.extend(batch_chinese_entities)
-            
-            # Brief pause between batches
-            if i + batch_size < len(entity_ids):
-                time.sleep(0.5)
-        
-        return all_english_entities, all_chinese_entities
+    def _handle_query_error(self, error, attempt: int, max_retries: int, language: str) -> bool:
+        """Handle query errors and return whether to retry with reduced limit"""
+        if isinstance(error, requests.exceptions.Timeout):
+            print(f"  Timeout on attempt {attempt + 1}/{max_retries} for {language.upper()}, reducing limit...")
+            return True
+        elif isinstance(error, requests.exceptions.HTTPError):
+            if error.response.status_code == 504:  # Gateway timeout
+                print(f"  Server timeout on attempt {attempt + 1}/{max_retries} for {language.upper()}, reducing limit...")
+                return True
+            elif error.response.status_code == 429:  # Too many requests
+                print(f"  Rate limited on attempt {attempt + 1}/{max_retries} for {language.upper()}, waiting...")
+                return False  # Don't reduce limit for rate limiting
+            else:
+                print(f"  HTTP Error for {language.upper()}: {error}")
+                return False
+        return False
     
     
     
-    def add_popularity_scores(self, entities: List[Dict]) -> List[Dict]:
-        """Add QRank popularity scores to entities."""
+    
+    def add_popularity_scores(self, entities: List[Dict], min_popularity: float = 100.0) -> List[Dict]:
+        """Add QRank popularity scores to entities and filter by minimum popularity."""
         if not self.qrank_data:
             self.qrank_data = self.load_qrank_data()
         
         scored_entities = []
+        filtered_count = 0
         
         for entity in entities:
             entity_id = entity['id']
             popularity_score = self.qrank_data.get(entity_id, 0.0)
             
+            # Filter out entities with popularity score below threshold
+            if popularity_score < min_popularity:
+                filtered_count += 1
+                continue
+            
             entity_with_score = entity.copy()
             entity_with_score['popularity_score'] = popularity_score
             
             scored_entities.append(entity_with_score)
+        
+        if filtered_count > 0:
+            print(f"    Filtered out {filtered_count} entities with popularity < {min_popularity}")
         
         return scored_entities
     
@@ -479,8 +427,8 @@ def main():
     english_df, chinese_df = collector.collect_entities(categories)
     
     # Save results with language suffix
-    en_filename = "wikidata_entities_with_popularity_en_0625.csv"
-    zh_filename = "wikidata_entities_with_popularity_zh_0625.csv"
+    en_filename = "wikidata_entities_with_popularity_en_0625_v2.csv"
+    zh_filename = "wikidata_entities_with_popularity_zh_0625_v2.csv"
     
     collector.save_results(english_df, en_filename)
     collector.save_results(chinese_df, zh_filename)
