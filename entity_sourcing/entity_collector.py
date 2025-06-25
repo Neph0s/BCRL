@@ -12,6 +12,14 @@ from typing import Dict, List, Optional, Tuple
 import time
 from qrank_loader import QRankLoader
 
+try:
+    from opencc import OpenCC
+    OPENCC_AVAILABLE = True
+except ImportError:
+    OPENCC_AVAILABLE = False
+    print("Warning: opencc-python-reimplemented not installed. Traditional to Simplified conversion will be skipped.")
+    print("Install with: pip install opencc-python-reimplemented")
+
 
 class WikidataEntityCollector:
     def __init__(self, qrank_csv_file='qrank.csv', major_sample_size=2000, minor_sample_size=100):
@@ -185,6 +193,43 @@ class WikidataEntityCollector:
                 return False
         return False
     
+    def convert_chinese_to_simplified(self, entities: List[Dict]) -> List[Dict]:
+        """Convert Traditional Chinese to Simplified Chinese in Chinese entities"""
+        if not OPENCC_AVAILABLE:
+            print("  Warning: OpenCC not available, skipping Traditional to Simplified conversion")
+            return entities
+        
+        cc = OpenCC('t2s')  # Traditional to Simplified
+        converted_entities = []
+        converted_count = 0
+        
+        for entity in entities:
+            if entity.get('language') == 'zh':
+                # Convert label and description
+                original_label = entity.get('label', '')
+                original_description = entity.get('description', '')
+                
+                converted_entity = entity.copy()
+                
+                if original_label:
+                    converted_label = cc.convert(original_label)
+                    if converted_label != original_label:
+                        converted_count += 1
+                    converted_entity['label'] = converted_label
+                
+                if original_description:
+                    converted_description = cc.convert(original_description)
+                    converted_entity['description'] = converted_description
+                
+                converted_entities.append(converted_entity)
+            else:
+                converted_entities.append(entity)
+        
+        if converted_count > 0:
+            print(f"  Converted {converted_count} Chinese entities from Traditional to Simplified")
+        
+        return converted_entities
+    
     
     
     
@@ -258,6 +303,9 @@ class WikidataEntityCollector:
                 print(f"Added {len(scored_english_entities)} English entities from {category_name}")
             
             if chinese_entities:
+                # Convert Traditional to Simplified Chinese
+                chinese_entities = self.convert_chinese_to_simplified(chinese_entities)
+                
                 scored_chinese_entities = self.add_popularity_scores(chinese_entities)
                 
                 # Add category information
@@ -427,8 +475,8 @@ def main():
     english_df, chinese_df = collector.collect_entities(categories)
     
     # Save results with language suffix
-    en_filename = "wikidata_entities_with_popularity_en_0625_v2.csv"
-    zh_filename = "wikidata_entities_with_popularity_zh_0625_v2.csv"
+    en_filename = "wikidata_entities_with_popularity_en_0625.csv"
+    zh_filename = "wikidata_entities_with_popularity_zh_0625.csv"
     
     collector.save_results(english_df, en_filename)
     collector.save_results(chinese_df, zh_filename)
