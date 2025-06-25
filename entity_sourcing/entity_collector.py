@@ -40,9 +40,8 @@ class WikidataEntityCollector:
             type_constraint = f"?item wdt:P31 wd:{instance_of} ."
             query_desc = f"instances of {instance_of}"
         else:
-            # For random sampling without type constraint, use offset-based sampling
-            # This avoids complex UNION queries that timeout
-            return self._sample_random_entities(limit)
+            # No type constraint - should not happen now
+            raise ValueError("instance_of cannot be None")
         
         # For broader coverage, we'll get entities first, then filter for labels
         query = f"""
@@ -203,27 +202,28 @@ class WikidataEntityCollector:
                         zh_label = binding.get('itemLabel_zh', {}).get('value', '')
                         zh_description = binding.get('itemDescription_zh', {}).get('value', '')
                         
-                        # Create English entity if has English content
-                        if en_label or en_description:
-                            english_entity = {
-                                'id': entity_id,
-                                'uri': entity_uri,
-                                'label': en_label or entity_id,
-                                'description': en_description,
-                                'language': 'en'
-                            }
-                            batch_english_entities.append(english_entity)
-                        
-                        # Create Chinese entity if has Chinese content
-                        if zh_label or zh_description:
-                            chinese_entity = {
-                                'id': entity_id,
-                                'uri': entity_uri,
-                                'label': zh_label or entity_id,
-                                'description': zh_description,
-                                'language': 'zh'
-                            }
-                            batch_chinese_entities.append(chinese_entity)
+                        # Create entities for each language with fallback logic
+                        for lang in ['en', 'zh']:
+                            if lang == 'en':
+                                label = en_label
+                                description = en_description
+                                target_list = batch_english_entities
+                            else:  # zh
+                                label = zh_label
+                                # Use English description as fallback if Chinese description is missing
+                                description = zh_description or en_description
+                                target_list = batch_chinese_entities
+                            
+                            # Only create entity if has label for this language
+                            if label:
+                                entity = {
+                                    'id': entity_id,
+                                    'uri': entity_uri,
+                                    'label': label,
+                                    'description': description,
+                                    'language': lang
+                                }
+                                target_list.append(entity)
                     
                     break  # Success, exit retry loop
                     
@@ -234,11 +234,9 @@ class WikidataEntityCollector:
                         continue
                     else:
                         print(f"  Failed to get entity details for batch: {e}")
-                        # Fallback: return basic entities with IDs only for English
-                        batch_english_entities = [
-                            {'id': eid, 'uri': f'http://www.wikidata.org/entity/{eid}', 'label': eid, 'description': '', 'language': 'en'} 
-                            for eid in batch_ids
-                        ]
+                        # Fallback: return empty lists
+                        batch_english_entities = []
+                        batch_chinese_entities = []
             
             all_english_entities.extend(batch_english_entities)
             all_chinese_entities.extend(batch_chinese_entities)
@@ -250,148 +248,6 @@ class WikidataEntityCollector:
         return all_english_entities, all_chinese_entities
     
     
-    def _sample_random_entities(self, limit: int) -> List[Dict]:
-        """
-        [LEGACY] Sample random entities from Wikidata efficiently using multiple small queries
-        Note: This method is kept for backward compatibility but not recommended for new usage
-        """
-        import random
-        
-        print(f"Sampling {limit} random entities from multiple categories...")
-        
-        # List of common entity types for sampling
-        sample_types = [
-            ("Q515", "cities"),
-            ("Q571", "books"), 
-            ("Q11424", "films"),
-            ("Q783794", "companies"),
-            ("Q95074", "fictional characters"),
-            ("Q7366", "songs"),
-            ("Q3918", "universities"),
-            ("Q33506", "museums"),
-            ("Q215380", "musical groups"),
-            ("Q5398426", "TV series"),
-            ("Q7889", "video games"),
-            ("Q482994", "albums"),
-            ("Q838948", "artworks"),
-            ("Q132241", "festivals"),
-            ("Q618779", "awards")
-        ]
-        
-        all_entities = []
-        entities_per_type = max(1, (limit // len(sample_types)) + 1)
-        
-        # Shuffle types for randomness
-        random.shuffle(sample_types)
-        
-        for type_id, type_name in sample_types:
-            if len(all_entities) >= limit:
-                break
-                
-            try:
-                # Use small queries with random offset
-                offset = random.randint(0, 100)  # Random starting point
-                query = f"""
-                SELECT DISTINCT ?item ?itemLabel_en ?itemDescription_en ?itemLabel_zh ?itemDescription_zh WHERE {{
-                  ?item wdt:P31 wd:{type_id} .
-                  OPTIONAL {{
-                    ?item rdfs:label ?itemLabel_en .
-                    FILTER(LANG(?itemLabel_en) = "en")
-                  }}
-                  OPTIONAL {{
-                    ?item schema:description ?itemDescription_en .
-                    FILTER(LANG(?itemDescription_en) = "en")
-                  }}
-                  OPTIONAL {{
-                    ?item rdfs:label ?itemLabel_zh .
-                    FILTER(LANG(?itemLabel_zh) = "zh")
-                  }}
-                  OPTIONAL {{
-                    ?item schema:description ?itemDescription_zh .
-                    FILTER(LANG(?itemDescription_zh) = "zh")
-                  }}
-                }}
-                OFFSET {offset}
-                LIMIT {entities_per_type}
-                """
-                
-                headers = {
-                    'Accept': 'application/sparql-results+json',
-                    'User-Agent': 'EntityCollector/1.0 (https://example.com/contact)'
-                }
-                
-                response = requests.get(
-                    self.sparql_endpoint,
-                    params={'query': query, 'format': 'json'},
-                    headers=headers,
-                    timeout=30
-                )
-                response.raise_for_status()
-                
-                data = response.json()
-                
-                for binding in data['results']['bindings']:
-                    if len(all_entities) >= limit * 2:  # Account for both languages
-                        break
-                        
-                    entity_uri = binding['item']['value']
-                    entity_id = entity_uri.split('/')[-1]
-                    
-                    # Get English data
-                    en_label = binding.get('itemLabel_en', {}).get('value', '')
-                    en_description = binding.get('itemDescription_en', {}).get('value', '')
-                    
-                    # Get Chinese data
-                    zh_label = binding.get('itemLabel_zh', {}).get('value', '')
-                    zh_description = binding.get('itemDescription_zh', {}).get('value', '')
-                    
-                    # Create English entity if has English content
-                    if en_label or en_description:
-                        english_entity = {
-                            'id': entity_id,
-                            'uri': entity_uri,
-                            'label': en_label or entity_id,
-                            'description': en_description,
-                            'sampled_from': type_name,
-                            'language': 'en'
-                        }
-                        all_entities.append(english_entity)
-                    
-                    # Create Chinese entity if has Chinese content
-                    if zh_label or zh_description:
-                        chinese_entity = {
-                            'id': entity_id,
-                            'uri': entity_uri,
-                            'label': zh_label or entity_id,
-                            'description': zh_description,
-                            'sampled_from': type_name,
-                            'language': 'zh'
-                        }
-                        all_entities.append(chinese_entity)
-                
-                print(f"  Sampled {len(data['results']['bindings'])} {type_name}")
-                
-                # Small delay between queries
-                time.sleep(0.5)
-                
-            except Exception as e:
-                print(f"  Error sampling {type_name}: {e}")
-                continue
-        
-        # Separate English and Chinese entities
-        english_entities = [e for e in all_entities if e.get('language') == 'en']
-        chinese_entities = [e for e in all_entities if e.get('language') == 'zh']
-        
-        # Shuffle for randomness
-        random.shuffle(english_entities)
-        random.shuffle(chinese_entities)
-        
-        # Trim to limit for each language
-        english_entities = english_entities[:limit]
-        chinese_entities = chinese_entities[:limit]
-        
-        print(f"Successfully sampled {len(english_entities)} English entities, {len(chinese_entities)} Chinese entities")
-        return english_entities, chinese_entities
     
     def add_popularity_scores(self, entities: List[Dict]) -> List[Dict]:
         """Add QRank popularity scores to entities."""
@@ -439,10 +295,7 @@ class WikidataEntityCollector:
             
             print(f"\n--- Processing {category_type} category: {category_name} ({id_display}) - {sample_size} entities ---")
             
-            if wikidata_id is None:  # Special case for random sampling
-                english_entities, chinese_entities = self._sample_random_entities(sample_size)
-            else:
-                english_entities, chinese_entities = self.query_wikidata_entities(wikidata_id, sample_size)
+            english_entities, chinese_entities = self.query_wikidata_entities(wikidata_id, sample_size)
             
             if english_entities:
                 scored_english_entities = self.add_popularity_scores(english_entities)
@@ -600,31 +453,22 @@ def main():
         ("Places - Museums", "Q33506", "minor"),                 # Museum
         
         # Organizations (Major category)
-        #("Organizations - Companies", "Q783794", "major"),       # Company
-        #("Organizations - NGOs", "Q79913", "minor"),             # Non-governmental organization
         ("Organizations - Sports Teams", "Q12973014", "minor"),  # Sports team
         ("Organizations - Bands", "Q215380", "minor"),           # Musical group
         ("Organizations - Schools", "Q3914", "minor"),           # School
-        #("Organizations - Associations", "Q4438121", "minor"),   # Association
         
         # Events (Minor category)
         ("Events - Wars", "Q198", "minor"),                      # War
         ("Events - Competitions", "Q476300", "minor"),           # Competition
         ("Events - Disasters", "Q3839081", "minor"),             # Disaster
-        
-        # # Science & Technology (Minor category)
-        # ("Science - Diseases", "Q12136", "minor"),               # Disease
-        # ("Science - Software", "Q7397", "minor"),                # Software
-        # ("Science - Chemical Compounds", "Q11173", "minor"),     # Chemical compound
-        # ("Science - Inventions", "Q15401930", "minor"),          # Invention
-        # ("Science - Theories", "Q17737", "minor"),               # Theory
-        # ("Science - Experiments", "Q33147", "minor"),            # Experiment
+        ("Events - Festivals", "Q132241", "minor"),              # Festival
         
         # Culture & Society (Minor category)
         ("Culture - Cuisines", "Q1968435", "minor"),             # Cuisine
         
-        # Experimental: Mixed sampling (Special category)
-        ("Mixed Entities (No Type)", None, "major"),             # No P31 constraint
+        # Additional Works categories
+        ("Works - Albums", "Q482994", "minor"),                  # Album
+        
     ]
     
     # Collect entities for both languages simultaneously
