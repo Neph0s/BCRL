@@ -442,6 +442,7 @@ def main():
         ("Works - Plays", "Q25379", "minor"),                    # Play
         ("Works - Anime", "Q1107", "major"),                     # Anime
         ("Works - Comics", "Q1004", "minor"),                    # Comic
+        ("Works - Albums", "Q482994", "minor"),                  # Album
         
         # Places (Major category)
         ("Places - Cities", "Q515", "major"),                    # City
@@ -460,10 +461,10 @@ def main():
         ("Events - Festivals", "Q132241", "minor"),              # Festival
         
         # Culture & Society (Minor category)
-        ("Culture - Cuisines", "Q1968435", "minor"),             # Cuisine
+        #("Culture - Cuisines", "Q1968435", "minor"),             # Cuisine
         
         # Additional Works categories
-        ("Works - Albums", "Q482994", "minor"),                  # Album
+        
         
     ]
     
