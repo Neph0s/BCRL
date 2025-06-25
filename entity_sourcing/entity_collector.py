@@ -14,10 +14,9 @@ from qrank_loader import QRankLoader
 
 
 class WikidataEntityCollector:
-    def __init__(self, language='en', qrank_csv_file='qrank.csv', major_sample_size=2000, minor_sample_size=100):
+    def __init__(self, qrank_csv_file='qrank.csv', major_sample_size=2000, minor_sample_size=100):
         self.sparql_endpoint = "https://query.wikidata.org/sparql"
         self.qrank_data = {}
-        self.language = language  # Support for different languages
         self.qrank_loader = QRankLoader(csv_file=qrank_csv_file)
         self.major_sample_size = major_sample_size
         self.minor_sample_size = minor_sample_size
@@ -58,12 +57,12 @@ class WikidataEntityCollector:
             'User-Agent': 'EntityCollector/1.0 (https://example.com/contact)'
         }
         
-        print(f"Querying Wikidata for {query_desc} (language: {self.language})...")
+        print(f"Querying Wikidata for {query_desc}...")
         
         for attempt in range(max_retries):
             try:
                 # Add longer timeout for large queries
-                timeout = 60 if limit > 500 else 30
+                timeout = 60 if limit > 500 else 60
                 
                 response = requests.get(
                     self.sparql_endpoint,
@@ -83,10 +82,10 @@ class WikidataEntityCollector:
                     entity_ids.append(entity_id)
                 
                 # Now get labels and descriptions for these entities
-                entities = self._get_entity_details(entity_ids[:limit])
+                english_entities, chinese_entities = self._get_entity_details(entity_ids[:limit])
                 
-                print(f"Retrieved {len(entities)} entities")
-                return entities
+                print(f"Retrieved {len(english_entities)} English entities, {len(chinese_entities)} Chinese entities")
+                return english_entities, chinese_entities
                 
             except requests.exceptions.Timeout:
                 print(f"  Timeout on attempt {attempt + 1}/{max_retries}, reducing limit...")
@@ -131,23 +130,44 @@ class WikidataEntityCollector:
         print(f"Failed to retrieve entities after {max_retries} attempts")
         return []
     
-    def _get_entity_details(self, entity_ids: List[str], max_retries: int = 2) -> List[Dict]:
-        """Get labels and descriptions for a list of entity IDs with retry logic"""
+    def _get_entity_details(self, entity_ids: List[str], max_retries: int = 2) -> Tuple[List[Dict], List[Dict]]:
+        """Get labels and descriptions for a list of entity IDs with retry logic
+        
+        Returns:
+            Tuple of (english_entities, chinese_entities)
+        """
         if not entity_ids:
-            return []
+            return [], []
         
         # Process in batches to avoid URL length limits
         batch_size = 50
-        all_entities = []
+        all_english_entities = []
+        all_chinese_entities = []
         
         for i in range(0, len(entity_ids), batch_size):
             batch_ids = entity_ids[i:i + batch_size]
             values_clause = " ".join([f"wd:{entity_id}" for entity_id in batch_ids])
             
+            # Always get both English and Chinese data
             query = f"""
-            SELECT DISTINCT ?item ?itemLabel ?itemDescription WHERE {{
+            SELECT DISTINCT ?item ?itemLabel_en ?itemDescription_en ?itemLabel_zh ?itemDescription_zh WHERE {{
               VALUES ?item {{ {values_clause} }}
-              SERVICE wikibase:label {{ bd:serviceParam wikibase:language "{self.language},en" }}
+              OPTIONAL {{
+                ?item rdfs:label ?itemLabel_en .
+                FILTER(LANG(?itemLabel_en) = "en")
+              }}
+              OPTIONAL {{
+                ?item schema:description ?itemDescription_en .
+                FILTER(LANG(?itemDescription_en) = "en")
+              }}
+              OPTIONAL {{
+                ?item rdfs:label ?itemLabel_zh .
+                FILTER(LANG(?itemLabel_zh) = "zh")
+              }}
+              OPTIONAL {{
+                ?item schema:description ?itemDescription_zh .
+                FILTER(LANG(?itemDescription_zh) = "zh")
+              }}
             }}
             """
             
@@ -157,7 +177,8 @@ class WikidataEntityCollector:
             }
             
             # Retry logic for each batch
-            batch_entities = []
+            batch_english_entities = []
+            batch_chinese_entities = []
             for attempt in range(max_retries):
                 try:
                     response = requests.get(
@@ -174,13 +195,36 @@ class WikidataEntityCollector:
                         entity_uri = binding['item']['value']
                         entity_id = entity_uri.split('/')[-1]
                         
-                        entity = {
-                            'id': entity_id,
-                            'uri': entity_uri,
-                            'label': binding.get('itemLabel', {}).get('value', entity_id),
-                            'description': binding.get('itemDescription', {}).get('value', '')
-                        }
-                        batch_entities.append(entity)
+                        # Get English data
+                        en_label = binding.get('itemLabel_en', {}).get('value', '')
+                        en_description = binding.get('itemDescription_en', {}).get('value', '')
+                        
+                        # Get Chinese data
+                        zh_label = binding.get('itemLabel_zh', {}).get('value', '')
+                        zh_description = binding.get('itemDescription_zh', {}).get('value', '')
+                        
+                        # Create English entity if has English content
+                        if en_label or en_description:
+                            english_entity = {
+                                'id': entity_id,
+                                'uri': entity_uri,
+                                'label': en_label or entity_id,
+                                'description': en_description,
+                                'language': 'en'
+                            }
+                            batch_english_entities.append(english_entity)
+                        
+                        # Create Chinese entity if has Chinese content
+                        if zh_label or zh_description:
+                            chinese_entity = {
+                                'id': entity_id,
+                                'uri': entity_uri,
+                                'label': zh_label or entity_id,
+                                'description': zh_description,
+                                'language': 'zh'
+                            }
+                            batch_chinese_entities.append(chinese_entity)
+                    
                     break  # Success, exit retry loop
                     
                 except Exception as e:
@@ -190,19 +234,21 @@ class WikidataEntityCollector:
                         continue
                     else:
                         print(f"  Failed to get entity details for batch: {e}")
-                        # Fallback: return basic entities with IDs only
-                        batch_entities = [
-                            {'id': eid, 'uri': f'http://www.wikidata.org/entity/{eid}', 'label': eid, 'description': ''} 
+                        # Fallback: return basic entities with IDs only for English
+                        batch_english_entities = [
+                            {'id': eid, 'uri': f'http://www.wikidata.org/entity/{eid}', 'label': eid, 'description': '', 'language': 'en'} 
                             for eid in batch_ids
                         ]
             
-            all_entities.extend(batch_entities)
+            all_english_entities.extend(batch_english_entities)
+            all_chinese_entities.extend(batch_chinese_entities)
             
             # Brief pause between batches
             if i + batch_size < len(entity_ids):
                 time.sleep(0.5)
         
-        return all_entities
+        return all_english_entities, all_chinese_entities
+    
     
     def _sample_random_entities(self, limit: int) -> List[Dict]:
         """
@@ -246,9 +292,24 @@ class WikidataEntityCollector:
                 # Use small queries with random offset
                 offset = random.randint(0, 100)  # Random starting point
                 query = f"""
-                SELECT DISTINCT ?item ?itemLabel ?itemDescription WHERE {{
+                SELECT DISTINCT ?item ?itemLabel_en ?itemDescription_en ?itemLabel_zh ?itemDescription_zh WHERE {{
                   ?item wdt:P31 wd:{type_id} .
-                  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "{self.language},en" }}
+                  OPTIONAL {{
+                    ?item rdfs:label ?itemLabel_en .
+                    FILTER(LANG(?itemLabel_en) = "en")
+                  }}
+                  OPTIONAL {{
+                    ?item schema:description ?itemDescription_en .
+                    FILTER(LANG(?itemDescription_en) = "en")
+                  }}
+                  OPTIONAL {{
+                    ?item rdfs:label ?itemLabel_zh .
+                    FILTER(LANG(?itemLabel_zh) = "zh")
+                  }}
+                  OPTIONAL {{
+                    ?item schema:description ?itemDescription_zh .
+                    FILTER(LANG(?itemDescription_zh) = "zh")
+                  }}
                 }}
                 OFFSET {offset}
                 LIMIT {entities_per_type}
@@ -270,20 +331,43 @@ class WikidataEntityCollector:
                 data = response.json()
                 
                 for binding in data['results']['bindings']:
-                    if len(all_entities) >= limit:
+                    if len(all_entities) >= limit * 2:  # Account for both languages
                         break
                         
                     entity_uri = binding['item']['value']
                     entity_id = entity_uri.split('/')[-1]
                     
-                    entity = {
-                        'id': entity_id,
-                        'uri': entity_uri,
-                        'label': binding.get('itemLabel', {}).get('value', ''),
-                        'description': binding.get('itemDescription', {}).get('value', ''),
-                        'sampled_from': type_name  # Legacy field
-                    }
-                    all_entities.append(entity)
+                    # Get English data
+                    en_label = binding.get('itemLabel_en', {}).get('value', '')
+                    en_description = binding.get('itemDescription_en', {}).get('value', '')
+                    
+                    # Get Chinese data
+                    zh_label = binding.get('itemLabel_zh', {}).get('value', '')
+                    zh_description = binding.get('itemDescription_zh', {}).get('value', '')
+                    
+                    # Create English entity if has English content
+                    if en_label or en_description:
+                        english_entity = {
+                            'id': entity_id,
+                            'uri': entity_uri,
+                            'label': en_label or entity_id,
+                            'description': en_description,
+                            'sampled_from': type_name,
+                            'language': 'en'
+                        }
+                        all_entities.append(english_entity)
+                    
+                    # Create Chinese entity if has Chinese content
+                    if zh_label or zh_description:
+                        chinese_entity = {
+                            'id': entity_id,
+                            'uri': entity_uri,
+                            'label': zh_label or entity_id,
+                            'description': zh_description,
+                            'sampled_from': type_name,
+                            'language': 'zh'
+                        }
+                        all_entities.append(chinese_entity)
                 
                 print(f"  Sampled {len(data['results']['bindings'])} {type_name}")
                 
@@ -294,14 +378,20 @@ class WikidataEntityCollector:
                 print(f"  Error sampling {type_name}: {e}")
                 continue
         
-        # Shuffle final results for randomness
-        random.shuffle(all_entities)
+        # Separate English and Chinese entities
+        english_entities = [e for e in all_entities if e.get('language') == 'en']
+        chinese_entities = [e for e in all_entities if e.get('language') == 'zh']
         
-        # Trim to exact limit
-        final_entities = all_entities[:limit]
+        # Shuffle for randomness
+        random.shuffle(english_entities)
+        random.shuffle(chinese_entities)
         
-        print(f"Successfully sampled {len(final_entities)} random entities")
-        return final_entities
+        # Trim to limit for each language
+        english_entities = english_entities[:limit]
+        chinese_entities = chinese_entities[:limit]
+        
+        print(f"Successfully sampled {len(english_entities)} English entities, {len(chinese_entities)} Chinese entities")
+        return english_entities, chinese_entities
     
     def add_popularity_scores(self, entities: List[Dict]) -> List[Dict]:
         """Add QRank popularity scores to entities."""
@@ -321,7 +411,7 @@ class WikidataEntityCollector:
         
         return scored_entities
     
-    def collect_entities(self, categories: List[Tuple[str, str, str]], limit_per_category: int = 500) -> pd.DataFrame:
+    def collect_entities(self, categories: List[Tuple[str, str, str]], limit_per_category: int = 500) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Collect entities from multiple categories with popularity scoring.
         
@@ -329,8 +419,12 @@ class WikidataEntityCollector:
             categories: List of (category_name, wikidata_id, category_type) tuples
                        category_type should be 'major' or 'minor'
             limit_per_category: Max entities per category (overridden by major/minor settings)
+            
+        Returns:
+            Tuple of (english_df, chinese_df)
         """
-        all_entities = []
+        all_english_entities = []
+        all_chinese_entities = []
         
         for category_name, wikidata_id, category_type in categories:
             id_display = wikidata_id if wikidata_id else "No Type Constraint"
@@ -345,44 +439,67 @@ class WikidataEntityCollector:
             
             print(f"\n--- Processing {category_type} category: {category_name} ({id_display}) - {sample_size} entities ---")
             
-            entities = self.query_wikidata_entities(wikidata_id, sample_size)
+            if wikidata_id is None:  # Special case for random sampling
+                english_entities, chinese_entities = self._sample_random_entities(sample_size)
+            else:
+                english_entities, chinese_entities = self.query_wikidata_entities(wikidata_id, sample_size)
             
-            if entities:
-                scored_entities = self.add_popularity_scores(entities)
+            if english_entities:
+                scored_english_entities = self.add_popularity_scores(english_entities)
                 
                 # Add category information
-                for entity in scored_entities:
+                for entity in scored_english_entities:
                     entity['category'] = category_name
                     entity['category_id'] = wikidata_id
                     entity['category_type'] = category_type
                 
-                all_entities.extend(scored_entities)
-                
-                print(f"Added {len(scored_entities)} entities from {category_name}")
-                
-                # Be nice to the API
-                time.sleep(1)
-        
-        # Convert to DataFrame and sort by popularity (high to low)
-        df = pd.DataFrame(all_entities)
-        
-        if not df.empty and 'popularity_score' in df.columns:
-            df = df.sort_values('popularity_score', ascending=False)
+                all_english_entities.extend(scored_english_entities)
+                print(f"Added {len(scored_english_entities)} English entities from {category_name}")
             
-        print(f"\nTotal entities collected: {len(df)}")
+            if chinese_entities:
+                scored_chinese_entities = self.add_popularity_scores(chinese_entities)
+                
+                # Add category information
+                for entity in scored_chinese_entities:
+                    entity['category'] = category_name
+                    entity['category_id'] = wikidata_id
+                    entity['category_type'] = category_type
+                
+                all_chinese_entities.extend(scored_chinese_entities)
+                print(f"Added {len(scored_chinese_entities)} Chinese entities from {category_name}")
+            
+            # Be nice to the API
+            time.sleep(1)
         
-        if not df.empty and 'popularity_score' in df.columns:
-            print(f"Entities with popularity scores: {len(df[df['popularity_score'] > 0])}")
-            print(f"Popular entities (score > 100000): {len(df[df['popularity_score'] > 100000])}")
-        else:
-            print("No entities collected or popularity scores not available")
+        # Convert to DataFrames and sort by popularity (high to low)
+        english_df = pd.DataFrame(all_english_entities)
+        chinese_df = pd.DataFrame(all_chinese_entities)
         
-        return df
+        if not english_df.empty and 'popularity_score' in english_df.columns:
+            english_df = english_df.sort_values('popularity_score', ascending=False)
+            
+        if not chinese_df.empty and 'popularity_score' in chinese_df.columns:
+            chinese_df = chinese_df.sort_values('popularity_score', ascending=False)
+            
+        print(f"\nTotal entities collected: {len(english_df)} English, {len(chinese_df)} Chinese")
+        
+        if not english_df.empty and 'popularity_score' in english_df.columns:
+            print(f"English entities with popularity scores: {len(english_df[english_df['popularity_score'] > 0])}")
+            print(f"Popular English entities (score > 100000): {len(english_df[english_df['popularity_score'] > 100000])}")
+        
+        if not chinese_df.empty and 'popularity_score' in chinese_df.columns:
+            print(f"Chinese entities with popularity scores: {len(chinese_df[chinese_df['popularity_score'] > 0])}")
+            print(f"Popular Chinese entities (score > 100000): {len(chinese_df[chinese_df['popularity_score'] > 100000])}")
+        
+        return english_df, chinese_df
     
     def save_results(self, df: pd.DataFrame, filename: str = "wikidata_entities_with_popularity.csv"):
         """Save results to CSV file, sorted by popularity (high to low)."""
-        df.to_csv(filename, index=False, encoding='utf-8')
-        print(f"Results saved to {filename}")
+        if not df.empty:
+            df.to_csv(filename, index=False, encoding='utf-8')
+            print(f"Results saved to {filename}")
+        else:
+            print(f"No data to save for {filename}")
     
     def postprocess_entities(self, input_filename: str, output_filename: str = None) -> pd.DataFrame:
         """
@@ -451,11 +568,8 @@ class WikidataEntityCollector:
 
 def main():
     """Main function to demonstrate entity collection with major/minor categories."""
-    # Test both English and Chinese with enhanced sampling
-    collectors = {
-        'en': WikidataEntityCollector(language='en', qrank_csv_file='qrank.csv', major_sample_size=1000, minor_sample_size=100),
-        'zh': WikidataEntityCollector(language='zh', qrank_csv_file='qrank.csv', major_sample_size=1000, minor_sample_size=100)
-    }
+    # Single collector that gets both English and Chinese data
+    collector = WikidataEntityCollector(qrank_csv_file='qrank.csv', major_sample_size=5000, minor_sample_size=500)
     
     # Enhanced categories with major/minor classification
     categories = [
@@ -486,12 +600,12 @@ def main():
         ("Places - Museums", "Q33506", "minor"),                 # Museum
         
         # Organizations (Major category)
-        ("Organizations - Companies", "Q783794", "major"),       # Company
-        ("Organizations - NGOs", "Q79913", "minor"),             # Non-governmental organization
+        #("Organizations - Companies", "Q783794", "major"),       # Company
+        #("Organizations - NGOs", "Q79913", "minor"),             # Non-governmental organization
         ("Organizations - Sports Teams", "Q12973014", "minor"),  # Sports team
         ("Organizations - Bands", "Q215380", "minor"),           # Musical group
         ("Organizations - Schools", "Q3914", "minor"),           # School
-        ("Organizations - Associations", "Q4438121", "minor"),   # Association
+        #("Organizations - Associations", "Q4438121", "minor"),   # Association
         
         # Events (Minor category)
         ("Events - Wars", "Q198", "minor"),                      # War
@@ -513,32 +627,54 @@ def main():
         ("Mixed Entities (No Type)", None, "major"),             # No P31 constraint
     ]
     
-    # Collect entities for both languages
-    for lang_code, collector in collectors.items():
-        print(f"\n{'='*60}")
-        print(f"Starting collection for {lang_code.upper()} entities...")
-        print(f"{'='*60}")
-        
-        df = collector.collect_entities(categories)
-        
-        # Save results with language suffix
-        filename = f"wikidata_entities_with_popularity_{lang_code}.csv"
-        collector.save_results(df, filename)
-        collector.postprocess_entities(filename, filename)
-        
-        # Display statistics
-        print(f"\n=== {lang_code.upper()} SUMMARY STATISTICS ===")
-        print(f"Total entities: {len(df)}")
+    # Collect entities for both languages simultaneously
+    print(f"\n{'='*60}")
+    print(f"Starting collection for both English and Chinese entities...")
+    print(f"{'='*60}")
+    
+    english_df, chinese_df = collector.collect_entities(categories)
+    
+    # Save results with language suffix
+    en_filename = "wikidata_entities_with_popularity_en_0625.csv"
+    zh_filename = "wikidata_entities_with_popularity_zh_0625.csv"
+    
+    collector.save_results(english_df, en_filename)
+    collector.save_results(chinese_df, zh_filename)
+    
+    collector.postprocess_entities(en_filename, en_filename)
+    collector.postprocess_entities(zh_filename, zh_filename)
+    
+    # Display statistics for English
+    print(f"\n=== ENGLISH SUMMARY STATISTICS ===")
+    print(f"Total entities: {len(english_df)}")
+    if not english_df.empty:
         print("\nBy category:")
-        print(df['category'].value_counts())
+        print(english_df['category'].value_counts())
         
         print("\nPopularity distribution:")
-        print(f"No popularity score (score = 0): {len(df[df['popularity_score'] == 0])}")
-        print(f"Low popularity (0 < score <= 100000): {len(df[(df['popularity_score'] > 0) & (df['popularity_score'] <= 100000)])}")
-        print(f"High popularity (score > 100000): {len(df[df['popularity_score'] > 100000])}")
+        print(f"No popularity score (score = 0): {len(english_df[english_df['popularity_score'] == 0])}")
+        print(f"Low popularity (0 < score <= 100000): {len(english_df[(english_df['popularity_score'] > 0) & (english_df['popularity_score'] <= 100000)])}")
+        print(f"High popularity (score > 100000): {len(english_df[english_df['popularity_score'] > 100000])}")
         
-        print(f"\nSample {lang_code} entities:")
-        sample = df.head(5)
+        print(f"\nSample English entities:")
+        sample = english_df.head(5)
+        for _, entity in sample.iterrows():
+            print(f"- {entity['label']} ({entity['id']}) - Score: {entity['popularity_score']:.1f} - {entity['category']}")
+    
+    # Display statistics for Chinese
+    print(f"\n=== CHINESE SUMMARY STATISTICS ===")
+    print(f"Total entities: {len(chinese_df)}")
+    if not chinese_df.empty:
+        print("\nBy category:")
+        print(chinese_df['category'].value_counts())
+        
+        print("\nPopularity distribution:")
+        print(f"No popularity score (score = 0): {len(chinese_df[chinese_df['popularity_score'] == 0])}")
+        print(f"Low popularity (0 < score <= 100000): {len(chinese_df[(chinese_df['popularity_score'] > 0) & (chinese_df['popularity_score'] <= 100000)])}")
+        print(f"High popularity (score > 100000): {len(chinese_df[chinese_df['popularity_score'] > 100000])}")
+        
+        print(f"\nSample Chinese entities:")
+        sample = chinese_df.head(5)
         for _, entity in sample.iterrows():
             print(f"- {entity['label']} ({entity['id']}) - Score: {entity['popularity_score']:.1f} - {entity['category']}")
 
