@@ -13,6 +13,7 @@ import pickle
 import random
 import __main__
 import tiktoken
+import threading
 from typing import Dict, List
 
 with open('config.json', 'r') as f:
@@ -122,12 +123,14 @@ cache_path = config['cache']['default_path']
 cache_sign = True
 cache = None
 reload_cache = False
+cache_lock = threading.Lock()  # 添加线程锁
 
 def set_cache_path(new_cache_path):
 	global cache_path
 	cache_path = new_cache_path
 	global reload_cache
 	reload_cache = True
+	print(f"set cache path to {cache_path}")
 
 def cached(func):
 	def wrapper(*args, **kwargs):		
@@ -140,29 +143,39 @@ def cached(func):
 		global cache
 		global reload_cache
 
-		if reload_cache:
-			cache = None # to reload
-			reload_cache = False
+		# 使用线程锁保护缓存操作
+		with cache_lock:
+			if reload_cache:
+				cache = None # to reload
+				reload_cache = False
 
-		if cache == None:
-			if not os.path.exists(cache_path):
-				cache = {}
-			else:
-				try:
-					cache = pickle.load(open(cache_path, 'rb'))  
-				except Exception as e:
-					# logger.info cache_path and throw error
-					logger.error(f'Error loading cache from {cache_path}')
+			if cache == None:
+				if not os.path.exists(cache_path):
 					cache = {}
+				else:
+					try:
+						cache = pickle.load(open(cache_path, 'rb'))  
+					except Exception as e:
+						# logger.info cache_path and throw error
+						logger.error(f'Error loading cache from {cache_path}')
+						cache = {}
 
-		if (cache_sign and key in cache) and not (cache[key] is None):
-			return cache[key]
-		else:		
-			result = func(*args, **kwargs)
-			if result != None:
+			if (cache_sign and key in cache) and not (cache[key] is None) and (not cache[key] == ERROR_SIGN):
+				return cache[key]
+
+		# 在锁外执行函数调用（避免长时间持有锁）
+		result = func(*args, **kwargs)
+		
+		# 重新获取锁来更新缓存
+		if result != None:
+			with cache_lock:
 				cache[key] = result
-				safe_pickle_dump(cache, cache_path)
-			return result
+				# 创建缓存副本避免在保存时被修改
+				cache_copy = cache.copy()
+			# 在锁外保存文件
+			safe_pickle_dump(cache_copy, cache_path)
+		
+		return result
 
 	return wrapper
 
@@ -221,11 +234,20 @@ def gemini(messages, search=False):
 			json=data,
 			timeout=gemini_config['timeout']
 		)
-
-		return response.json()['choices'][0]['message']['content']
+		try:
+			return response.json()['choices'][0]['message']['content']
+		except Exception as e:
+			time.sleep(30)
+			logger.error(f"Error parsing response: {response.text}")
+			
+			if 'adult' in response.text:
+				return ERROR_SIGN
+			else:
+				return None
 			
 	except Exception as e:
 		print(f"请求失败: {e}")
+		time.sleep(30)
 		return None
 
 def claude(messages):
@@ -288,7 +310,6 @@ def gpt(messages):
 				}
 			}
 		)
-		import pdb; pdb.set_trace()
 		return response.choices[0].message.content
 			
 	except Exception as e:
@@ -377,6 +398,10 @@ def get_response(post_processing_funcs=[], **kwargs):
 	nth_generation = 0
 
 	while True:
+		if nth_generation > kwargs.get('max_retry', 5):
+			# Return error response with backup data if parse_response failed
+			return None
+		
 		logger.info(f'{nth_generation}th generation')
 		response = _get_response(**kwargs, nth_generation=nth_generation)
 		logger.info(f'response by LLM: {response}')
@@ -384,6 +409,10 @@ def get_response(post_processing_funcs=[], **kwargs):
 		if response is None:
 			continue 
 		
+		if response == ERROR_SIGN: # BLOCKED
+			nth_generation += 1
+			continue
+
 		# Break if we got a valid response, otherwise retry
 		# Run response through post-processing pipeline
 		for i, post_processing_func in enumerate(post_processing_funcs):
@@ -395,9 +424,7 @@ def get_response(post_processing_funcs=[], **kwargs):
 			return response
 		else:
 			nth_generation += 1
-			if nth_generation > kwargs.get('max_retry', 5):
-				# Return error response with backup data if parse_response failed
-				return None
+			
 
 def ensure_question_format(response, **kwargs):
 	try:
@@ -571,3 +598,91 @@ def extract_json(text, **kwargs):
 	res = _extract_json(text)
 
 	return res
+
+def stable_shuffle_tmp(entitys):
+    """
+    Performs a deterministic shuffle of entity names using a custom hash function.
+    
+    This function provides consistent ordering of entitys across different runs,
+    unlike Python's built-in hash() which is randomized per process.
+    
+    Args:
+        entitys: List of entitynames (strings) to be shuffled
+        
+    Returns:
+        List of entitynames in a deterministically shuffled order
+        
+    Note:
+        Uses a simple polynomial rolling hash function (similar to Java's String.hashCode())
+        with a multiplier of 31 to generate consistent hash values.
+    """
+    def string_hash(s):
+        """
+        Computes a deterministic 32-bit hash value for a string.
+        
+        Args:
+            s: Input string to hash
+            
+        Returns:
+            32-bit integer hash value
+        """
+        h = 0
+        # Multiply by 31 at each step to distribute bits well
+        # Use bitwise AND with 0xFFFFFFFF to keep within 32 bits
+        for c in s:
+            h = (31 * h + ord(c)) & 0xFFFFFFFF
+        return h
+    
+    # Generate (entityname, hash) pairs for stable sorting
+    entitys_with_hash = [(entityname, string_hash(entityname['label'])) 
+                       for entityname in entitys]
+    
+    # Sort entitys based on their hash values for deterministic ordering
+    entitys_with_hash.sort(key=lambda x: x[1])
+    
+    # Extract and return just the entitynames in their new order
+    return [entity_hash_pair[0] for entity_hash_pair in entitys_with_hash]
+
+def stable_shuffle(entitys):
+    """
+    Performs a deterministic shuffle of entity names using a custom hash function.
+    
+    This function provides consistent ordering of entitys across different runs,
+    unlike Python's built-in hash() which is randomized per process.
+    
+    Args:
+        entitys: List of entitynames (strings) to be shuffled
+        
+    Returns:
+        List of entitynames in a deterministically shuffled order
+        
+    Note:
+        Uses a simple polynomial rolling hash function (similar to Java's String.hashCode())
+        with a multiplier of 31 to generate consistent hash values.
+    """
+    def string_hash(s):
+        """
+        Computes a deterministic 32-bit hash value for a string.
+        
+        Args:
+            s: Input string to hash
+            
+        Returns:
+            32-bit integer hash value
+        """
+        h = 0
+        # Multiply by 31 at each step to distribute bits well
+        # Use bitwise AND with 0xFFFFFFFF to keep within 32 bits
+        for c in s:
+            h = (31 * h + ord(c)) & 0xFFFFFFFF
+        return h
+    
+    # Generate (entityname, hash) pairs for stable sorting
+    entitys_with_hash = [(entityname, string_hash(entityname['label'] + str(entityname['popularity_score']))) 
+                       for entityname in entitys]
+    
+    # Sort entitys based on their hash values for deterministic ordering
+    entitys_with_hash.sort(key=lambda x: x[1])
+    
+    # Extract and return just the entitynames in their new order
+    return [entity_hash_pair[0] for entity_hash_pair in entitys_with_hash]
