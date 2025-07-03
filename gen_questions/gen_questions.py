@@ -14,9 +14,9 @@ from utils import set_cache_path
 search_model = 'gemini_search'  # 选择 'gemini_search' 或 'deer-flow'
 question_model = 'claude-4-sonnet' #'gpt'
 language = 'en'  # 选择 'zh' 或 'en'
-entity_files = ['my_entities_en.csv', 'wikidata_entities_with_popularity_en_0625.csv'] 
-output_file = 'bc_questions_0627_en.json'
-existing_files = ["results/bc_questions_0625_en.json"]  # 已有的数据文件
+entity_files = ['my_entities_en.csv']#, 'wikidata_entities_with_popularity_en_0625.csv'] 
+output_file = 'bc_questions_0627_en_small.json'
+existing_files = []#"results/bc_questions_0625_en.json"]  # 已有的数据文件
 parallel = True
 set_cache_path('.cache-bc_questions_0625_en.pkl') # '.cache-' + output_file.replace('.json', '.pkl'))
 
@@ -72,27 +72,33 @@ def process_entity(entity_info):
 	result['search_response'] = knowledge
 	messages.append({'role': 'assistant', 'content': knowledge})
 
+	if knowledge is None:
+		return result
+
 	# 二次扩展
 	search_second_prompt = get_prompt('search_second_prompt', language)
 	messages.append({'role': 'user', 'content': search_second_prompt})
 	knowledge2 = get_response(model=search_model, messages=messages)
 	result['search_again_response'] = knowledge2
 	messages.append({'role': 'assistant', 'content': knowledge2})
-	
+
+	if knowledge2 is None:
+		return result
+
 	# 生成问题 - 后续只使用label
-	# question_generate_prompt = get_prompt('question_generate_prompt', language)
-	# for N_I_LOW, N_I_HIGH in [(3, 4), (5, 6)]:
-	# 	prompt = question_generate_prompt.replace('{entity}', entity_name).replace('{N_I_LOW}', str(N_I_LOW)).replace('{N_I_HIGH}', str(N_I_HIGH)).replace('{N_Q}', '3')
+	question_generate_prompt = get_prompt('question_generate_prompt', language)
+	for N_I_LOW, N_I_HIGH in [(4, 5), (5, 6)]:
+		prompt = question_generate_prompt.replace('{entity}', entity_name).replace('{N_I_LOW}', str(N_I_LOW)).replace('{N_I_HIGH}', str(N_I_HIGH)).replace('{N_Q}', '3')
 
-	# 	messages.append({'role': 'user', 'content': prompt})
-	# 	response = get_response([extract_json, ensure_question_format], model=question_model, messages=messages)
+		messages.append({'role': 'user', 'content': prompt})
+		response = get_response([extract_json, ensure_question_format], model=question_model, messages=messages)
 
-	# 	if 'question_response' not in result:
-	# 		result['question_response'] = []
+		if 'question_response' not in result:
+			result['question_response'] = []
 		
-	# 	result['question_response'].append(response)
+		result['question_response'].append(response)
 		
-	# 	messages.pop()
+		messages.pop()
 
 	# 	# 离线判定答案唯一性 TODO
 
@@ -127,7 +133,6 @@ def main():
 	
 	# 读取多个实体文件
 	entities_data = []
-	import pdb; pdb.set_trace()
 	n_entities = 10100
 	# 按优先级顺序读取各个文件
 	for i_f, entity_file in enumerate(entity_files):

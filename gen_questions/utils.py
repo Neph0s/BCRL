@@ -239,11 +239,16 @@ def gemini(messages, search=False):
 		except Exception as e:
 			time.sleep(30)
 			logger.error(f"Error parsing response: {response.text}")
-			
-			if 'adult' in response.text:
-				return ERROR_SIGN
-			else:
+
+			# if any(word in response.text.lower() for word in ['adult', 'prohibited', 'blocked']):
+			# 	return ERROR_SIGN
+			# else:
+			# 	return None
+
+			if any(word in response.text.lower() for word in ['limit', 'resource', 'timeout', 'time out', 'try again']):
 				return None
+			else:
+				return ERROR_SIGN
 			
 	except Exception as e:
 		print(f"请求失败: {e}")
@@ -280,6 +285,7 @@ def claude(messages):
 		return response.choices[0].message.content
 			
 	except Exception as e:
+		import pdb; pdb.set_trace()
 		time.sleep(30)
 		print(f"请求失败: {e}")
 		return None

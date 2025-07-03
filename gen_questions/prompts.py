@@ -66,7 +66,7 @@ These questions should satisfy:
 3) Clear questions: Questions should be clear, objective, and not contain subjective evaluations, judgments, or reasoning;
 4) Diversity: Different questions should have diverse expressions; the described information can overlap but should not be completely identical.
 5) Search difficulty: Each question should have a certain level of challenge, requiring multiple internet searches to answer, but single searches cannot directly yield the answer;
-6) Scope limitation: Each question should limit the scope of the question (type of answer) to prevent respondents from thinking in other directions. You need to provide a list of types from broad to specific (no more than 4), such as ["fictional character", "web novel character", "character from 'Lord of Mysteries'"]. You need to use the placeholder {entity_type} in the question to represent the entity type.
+6) Scope limitation: Each question should limit the scope of the question (type of answer) to prevent respondents from thinking in other directions. You need to provide a list of types from broad to specific (2~3), such as ["novel character", "fantasy novel character", "character from 'A Song of Ice and Fire'"]. You need to use the placeholder {entity_type} in the question to represent the entity type.
 
 The information described in the questions should satisfy:
 1) Search clues: Provide appropriate keywords for searching, but avoid single searches that directly yield the answer;
