@@ -98,18 +98,32 @@ def sample_questions(train_entities: List[Dict[str, Any]], query_per_entity: int
 
 def get_system_prompt_from_hdfs():
     """从HDFS文件中读取system_prompt"""
-    import pandas as pd
+
     hdfs_file = 'hdfs://haruna/home/byte_data_seed/ssd_ygdt/user/zhanglin.0106/agent_rl/data/dr_train_for_seed1.6_filtered_only_open_17389.parquet'
     df = pd.read_parquet(hdfs_file)
     system_prompt = df['session'].iloc[0]['system_prompt']
     #return system_prompt
     system_prompt = json.loads(system_prompt)
-
     system_prompt['messages'][0]['content'] = """You are an online information search expert. Your task is to collect relevant information through online searches based on user questions and then answer those questions using the gathered information.\n\n# Task Description\nUpon receiving a user\'s question, you need to fully understand their needs, utilize the retrieval tools I provide, and analyze the corresponding information and data from multiple perspectives to answer the user\'s question.\n\nThe following principles must be adhered to during task execution:\n- **Fully Understand User Needs**: You must analyze the user\'s question from multiple angles, breaking it down if necessary, to ensure you grasp the primary intent of the question.\n- **Flexible Use of Tools**: Once you fully understand the user\'s needs, please use the tools I provide to retrieve information.\n    - If you reflect and find that the information previously obtained by the tool is incomplete or incorrect, making it insufficient to answer the user\'s question, please consider what additional information needs to be searched, whether the approach needs adjustment, and call the tool again to obtain complete information.\n    - You can also break down the information to be retrieved into multiple sub-questions, each specific enough to be retrieved independently.\n- **Diverse Answering Style**: You need to combine the acquired information to ensure your answers are concise and accurate.\n\nAdditionally, you possess the ability for deep thinking. Before replying to the user, you will engage in comprehensive deep thought. Your thought process should be enclosed within `<think>` and `</think>` tags, and based on this thought process, you will either call a tool to retrieve information or formulate the final answer.\nFor example: "<think>This is the thinking process...</think>This is the tool call" or "<think>This is the thinking process...</think>This is the final answer."\nFor all user requests, you must always think deeply before answering.\n\nWhen using tools, strictly follow this format:\n<|FunctionCallBegin|>[{"name": "function_name","parameters": {"param": "xxx"}}]<|FunctionCallEnd|>\n\n## Environment Information\nCurrent Location: Beijing\nCurrent Time: {2025-07-01 03:37:17 PM JST}"""
+    
+    system_prompt['tools'][0]['function']['description'] = "Bing Web Search API provides secure, ad-free, and location-aware search results that can extract relevant information from billions of web documents. With a single API call, you can leverage Bing's capabilities to search billions of web pages, images, videos, and news, helping your users find the content they need from the World Wide Web."
+    system_prompt['tools'][0]['function']['parameters']['properties']["query"]['description'] = "Keywords for internet search. Use either the same language as the user's question, or English."
+    system_prompt['tools'][0]['function']['parameters']['properties']['offset']['description'] = "Offset starting from 0, not exceeding 100"
+    system_prompt['tools'][0]['function']['parameters']['properties']['count']['description'] = "Number of results per page, maximum 20, default 10"
+    system_prompt['tools'][0]['function']['parameters']['properties']['mkt']['description'] = "Market codes, use en-US for English content search, use zh-CN for Chinese content search, default en-US"
+    system_prompt['tools'][0]['function']['parameters']['properties']['mkt']['default'] = "en-US"
+
+    system_prompt['tools'][1]['function']['description'] = "Use requests + BeautifulSoup to get the raw content of a webpage. If the raw content is too long, it will automatically trigger model summarization."
+    system_prompt['tools'][1]['function']['parameters']['properties']["url"]['description'] = "The webpage URL to read"
+    system_prompt['tools'][1]['function']['parameters']['properties']['title']['description'] = "Webpage title, optional"
+    system_prompt['tools'][1]['function']['parameters']['properties']['length_limit']['description'] = "If the page content character count exceeds this value, the large model will summarize the webpage content, default 2000"
+    system_prompt['tools'][1]['function']['parameters']['properties']['query']['description'] = "Used for targeted summarization by the large model, default value is 'None'."
+    system_prompt['tools'][1]['function']['parameters']['properties']['query']['default'] = "None"
 
     system_prompt = json.dumps(system_prompt, ensure_ascii=False)
 
     return system_prompt
+
 def convert_to_hdfs_format(data: pd.DataFrame, data_source: str) -> List[Dict[str, Any]]:
     """转换为HDFS格式"""
     sessions = []
@@ -163,7 +177,7 @@ def main():
     for file in ['/root/wxt/DeepResearcher/data/browsecomp.parquet', '/root/wxt/DeepResearcher/data/browsecomp-zh.parquet']:
     # 1. 加载数据
         data = load_parquet_data(file)
-    
+
         # 7. 转换为HDFS格式
         print("\n🔄 转换为HDFS格式")
         data_source = data_source=file.split('/')[-1].split('.')[0]
@@ -176,6 +190,8 @@ def main():
         output_df = pd.DataFrame(sessions)
     
         output_file = file.replace('.parquet', '-alphaseed.parquet')
+
+        print(f"保存数据到: {output_file}")
     
         output_df.to_parquet(output_file, index=False)
     
