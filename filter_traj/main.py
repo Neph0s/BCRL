@@ -138,31 +138,34 @@ def process_case_result(case_result_file):
     thinking_content, tool_call = messages[2]['content'].split('</think>')
     thinking_content = thinking_content.replace('<think>', '')
 
-    sys_prompt = """Your task is to refine a given thinking_process by removing all specific factual content while preserving the underlying logical reasoning flow. Factual content refers to information about particular entities (such as people, events, and artifacts), regardless of whether it is correct or not. Do not remove foundational or commonsense knowledge that serves as a general rule for reasoning (e.g.,  scientific principles commonly taught in high school). Rephrase sentences with minimal but necessary changes to maintain coherence after removing the facts. The refined process must use the same language as the original.
-
+    sys_prompt = """Your task is to infer a plausible {thinking process} that connects a given {question} to a {tool_call}. The inferred process must meet the following criteria:
+- Logical Coherence: It must clearly and logically explain the reasoning that leads from the {question} to the specific {tool_call}.
+- Factual Minimality: It should only contain the minimal factual information necessary to justify the {tool_call}. Avoid introducing external knowledge about real-world people, events, or artifacts, though commonsense knowledge is permitted.
+- Language: It must be written in the same language as the {question}.
+- Don't include tool calls in the {thinking process}.
+    
 ## Input
 ===question===
-{question}
-===thinking_process===
-{thinking_content}
+{question_}
 ===tool_call===
-{tool_call}
+{tool_call_}
 
-## Instruction: Output in the following format
-Analysis: {Identify the factual content} 
-Refined Thinking Process: {Provide the refined thinking process, removing content about factual information. Use the same language as the original thinking process. Don't include tool calls.}
-""".replace('{question}', q).replace('{thinking_content}', thinking_content).replace('{tool_call}', tool_call)
+## Output in the following format
+Analysis: {your analysis} 
+Thinking Process: {the inferred thinking process}
+""".replace('{question_}', q).replace('{tool_call_}', tool_call)
 
     from utils import get_response
 
     def ensure_format(response, **kwargs):
-        if len(response.split('Refined Thinking Process:')) == 2:
+        if len(response.split('Thinking Process:')) == 2:
             return response
         else:
             return False
 
     response = get_response([ensure_format], model='seed', messages=[{'role': 'user', 'content': sys_prompt}])
-    refined_thinking_process = response.split('Refined Thinking Process:')[1].strip(' ')
+    refined_thinking_process = response.split('Thinking Process:')[1].strip(' ')
+    import pdb; pdb.set_trace()
     if '===tool_call===' in refined_thinking_process:
         refined_thinking_process = refined_thinking_process.split('===tool_call===')[0]
     elif  '<|FunctionCallBegin|>' in refined_thinking_process:
