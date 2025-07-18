@@ -2,7 +2,9 @@ import glob
 import json 
 import pandas as pd 
 import argparse 
-import os 
+import os
+from concurrent.futures import ThreadPoolExecutor
+import threading 
 
 MAX_LENGTH = 32768
 def is_mostly_chinese(x: str) -> bool:
@@ -56,24 +58,27 @@ print(f'Num Case Result Files {len(case_result_json_files)}')
 all_messages = []
 all_traj_infos = []
 
-for j, case_result_file in enumerate(case_result_json_files):
+# Thread-safe locks for shared data
+messages_lock = threading.Lock()
+traj_infos_lock = threading.Lock()
+
+def process_case_result(case_result_file):
     with open(case_result_file, 'r') as f:
         case_result = json.load(f)
     
     # 如果是case_result.json文件，如 /root/wxt/traj_old/output_filter_pipeline_input_xintao_reverse_v1_sp_v13_attc/00/38/2984/case_result.json
     # step 1：找到 "final_sample_idx"，读取
+
     final_sample_idx = case_result.get('final_sample_idx')
 
     # step 2: 如果"final_sample_idx"不是None，说明有需要的sample，读取case_result_file.replace('case_result', f'{final_sample_idx}_agent')
-    if final_sample_idx is None: continue 
+    if final_sample_idx is None: return 
 
     traj_infos = case_result.get('traj_infos', {})
     traj_infos = {_['sample_idx']: _ for _ in traj_infos}[final_sample_idx]
 
     if traj_infos['num_tokens_all'] > MAX_LENGTH or traj_infos['num_tool_calls'] < 3: 
-        continue 
-    
-    all_traj_infos.append(traj_infos)
+        return 
 
     message_file = case_result_file.replace('case_result', f'{final_sample_idx}_agent')
     with open(message_file, 'r') as f:
@@ -133,7 +138,7 @@ for j, case_result_file in enumerate(case_result_json_files):
     thinking_content, tool_call = messages[2]['content'].split('</think>')
     thinking_content = thinking_content.replace('<think>', '')
 
-    sys_prompt = """Your task is to refine a given thinking_process by identifying and removing all discussions about 'redundant entities'. Redundant entities are entities that were considered but later abandoned (judged to be irrelevant to the possible answer, and not used in the search query).Therefore, discussions about such entities become redundant, and I need you to remove them.
+    sys_prompt = """Your task is to refine a given thinking_process by identifying and removing all discussions about 'redundant entities'. Redundant entities are entities that were considered but later abandoned (judged to be irrelevant to the possible answer, and not used in the search query). Therefore, discussions about such entities become redundant, and I need you to remove them. The refined thinking process should use the same language as the original thinking process.
 
 ## Input
 ===question===
@@ -146,7 +151,7 @@ Processing Instructions
 
 ## Output in the following format
 Analysis: {Identify the redundant entities, and explain why they are redundant} 
-Refined Thinking Process: {Provide the streamlined thinking process, removing discussions about redundant entities. Use the same language as the original thinking process.}
+Refined Thinking Process: {Provide the streamlined thinking process, removing discussions about redundant entities. Use the same language as the original thinking process. Don't include tool calls.}
 """.replace('{question}', q).replace('{thinking_content}', thinking_content).replace('{tool_call}', tool_call)
 
     from utils import get_response
@@ -158,16 +163,45 @@ Refined Thinking Process: {Provide the streamlined thinking process, removing di
             return False
 
     response = get_response([ensure_format], model='seed', messages=[{'role': 'user', 'content': sys_prompt}])
+    refined_thinking_process = response.split('Refined Thinking Process:')[1].strip(' ')
+    if '===tool_call===' in refined_thinking_process:
+        refined_thinking_process = refined_thinking_process.split('===tool_call===')[0]
+    elif  '<|FunctionCallBegin|>' in refined_thinking_process:
+        refined_thinking_process = refined_thinking_process.split('<|FunctionCallBegin|>')[0]
 
-    refined_assistant_message = '<think>' + response.split('Refined Thinking Process:')[1] + '</think>' + tool_call
-    print('Original Thinking Process: ', thinking_content)
-    print('Refined Thinking Process: ', response.split('Refined Thinking Process:')[1])
+    refined_assistant_message = '<think>' + refined_thinking_process + '</think>' + tool_call
+    print('\n\n=====Original Thinking Process=====\n\n', thinking_content)
+    print('\n\n=====Refined Thinking Process=====\n\n', refined_thinking_process)
     messages[2]['content'] = refined_assistant_message
     #print(json.dumps(messages, ensure_ascii=False,indent=2))
-    all_messages.append({'messages': messages})
+    
 
-    if j> 5: break
+    return messages, traj_infos
 
+
+# Use ThreadPoolExecutor to process files in parallel
+if 1:
+    with ThreadPoolExecutor(max_workers=40) as executor:
+        futures = []
+        for j, case_result_file in enumerate(case_result_json_files):
+            future = executor.submit(process_case_result, case_result_file)
+            futures.append(future)
+        
+        # Wait for all tasks to complete and collect results
+        for future in futures:
+            result = future.result()
+            if result is not None:
+                messages, traj_infos = result
+                all_messages.append({'messages': messages})
+                all_traj_infos.append(traj_infos)
+else:
+    # not parallel 
+    for j, case_result_file in enumerate(case_result_json_files):
+        result = process_case_result(case_result_file)
+        if result is not None:
+            messages, traj_infos = result
+            all_messages.append({'messages': messages})
+            all_traj_infos.append(traj_infos)
     
 
 with open(output_traj_path, 'w') as f:
@@ -178,12 +212,13 @@ df.to_parquet(output_traj_path.replace('.json', '.parquet'))
 
 # 统计traj_infos
 print('total num: ', len(all_traj_infos))
-for k in all_traj_infos[0].keys():
-    all_values = [_.get(k) for _ in all_traj_infos]
-    max_value = max(all_values)
-    avg_value = sum(all_values) / len(all_values)
-    min_value = min(all_values)
-    print(f'{k} max: {max_value} avg: {avg_value} min: {min_value}')
+if all_traj_infos:
+    for k in all_traj_infos[0].keys():
+        all_values = [_.get(k) for _ in all_traj_infos]
+        max_value = max(all_values)
+        avg_value = sum(all_values) / len(all_values)
+        min_value = min(all_values)
+        print(f'{k} max: {max_value} avg: {avg_value} min: {min_value}')
 
 
 
