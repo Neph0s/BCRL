@@ -43,7 +43,7 @@ traj_path = args.file_path
 #'/root/wxt/traj_zhanghe/output_filter_pipeline_input_ww_dr_mix_v1_sp_v13_attc'
 #'/root/wxt/traj_zhanghe/output_filter_pipeline_input_xintao_reverse_v1_sp_v13_attc'
 #'/Users/bytedance/sft_traj/filter_pipeline_input_webgptv3_from_zehui'
-output_traj_path = f'./filtered_traj/{traj_path.split("/")[-1]}-{MAX_LENGTH}-refined.json'
+output_traj_path = f'./filtered_traj/{traj_path.split("/")[-1]}-{MAX_LENGTH}-refined_v2.json'
 
 # 查找函数（支持通配符）
 def find_local_files_glob(local_path, pattern):
@@ -138,7 +138,7 @@ def process_case_result(case_result_file):
     thinking_content, tool_call = messages[2]['content'].split('</think>')
     thinking_content = thinking_content.replace('<think>', '')
 
-    sys_prompt = """Your task is to refine a given thinking_process by identifying and removing all discussions about 'redundant entities'. Redundant entities are entities that were considered but later abandoned (judged to be irrelevant to the possible answer, and not used in the search query). Therefore, discussions about such entities become redundant, and I need you to remove them. The refined thinking process should use the same language as the original thinking process.
+    sys_prompt = """Your task is to refine a given thinking_process by removing all specific factual content while preserving the underlying logical reasoning flow. Factual content refers to information about particular entities (such as people, events, and artifacts), regardless of whether it is correct or not. Do not remove foundational or commonsense knowledge that serves as a general rule for reasoning (e.g.,  scientific principles commonly taught in high school). Rephrase sentences with minimal but necessary changes to maintain coherence after removing the facts. The refined process must use the same language as the original.
 
 ## Input
 ===question===
@@ -147,11 +147,10 @@ def process_case_result(case_result_file):
 {thinking_content}
 ===tool_call===
 {tool_call}
-Processing Instructions
 
-## Output in the following format
-Analysis: {Identify the redundant entities, and explain why they are redundant} 
-Refined Thinking Process: {Provide the streamlined thinking process, removing discussions about redundant entities. Use the same language as the original thinking process. Don't include tool calls.}
+## Instruction: Output in the following format
+Analysis: {Identify the factual content} 
+Refined Thinking Process: {Provide the refined thinking process, removing content about factual information. Use the same language as the original thinking process. Don't include tool calls.}
 """.replace('{question}', q).replace('{thinking_content}', thinking_content).replace('{tool_call}', tool_call)
 
     from utils import get_response
