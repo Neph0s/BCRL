@@ -135,8 +135,11 @@ def process_case_result(case_result_file):
     # 对第一条thinking做处理
     assert(messages[2]['role'] == 'assistant')
     q = messages[1]['content']
-    thinking_content, tool_call = messages[2]['content'].split('</think>')
-    thinking_content = thinking_content.replace('<think>', '')
+    try:
+        thinking_content, tool_call = messages[2]['content'].split('</think>')
+        thinking_content = thinking_content.replace('<think>', '')
+    except:
+        return 
 
     sys_prompt = """Your task is to infer a plausible {thinking process} that connects a given {question} to a {tool_call}. The inferred process must meet the following criteria:
 - Logical Coherence: It must clearly and logically explain the reasoning that leads from the {question} to the specific {tool_call}.
@@ -165,16 +168,86 @@ Thinking Process: {the inferred thinking process}
 
     response = get_response([ensure_format], model='seed', messages=[{'role': 'user', 'content': sys_prompt}])
     refined_thinking_process = response.split('Thinking Process:')[1].strip(' ')
-    import pdb; pdb.set_trace()
+    
     if '===tool_call===' in refined_thinking_process:
         refined_thinking_process = refined_thinking_process.split('===tool_call===')[0]
     elif  '<|FunctionCallBegin|>' in refined_thinking_process:
         refined_thinking_process = refined_thinking_process.split('<|FunctionCallBegin|>')[0]
 
-    refined_assistant_message = '<think>' + refined_thinking_process + '</think>' + tool_call
+    all_thoughts = [ m['content'].split('</think>')[0].replace('<think>', '') for m in messages if m['role'] == 'assistant' and '<think>' in m['content']]
+
+    assert (len(all_thoughts) > 1)
+    subsequent_thoughts_str = '\n\nAction: ...\n\nObservation: ...\n\n\n'.join([ f'Step {i+2}:\nThought: ' + t for i, t in enumerate(all_thoughts[1:4])])
+
+    sys_prompt = """Your task is to check if a proposed {new first thought} is consistent with reasoning steps mentioned later, and enrich it if necessary.
+
+Context: You are given a multi-step reasoning process where the original first thought was lost and replaced by a concise {new first thought}. Your goal is to ensure this replacement doesn't omit any critical conclusions that later steps rely on.
+
+Your process should be:
+
+1. Identify Inherited Reasoning: Your main goal is to scan the {subsequent thoughts} for phrases that explicitly refer back to a previous step, like "Following the previous reasoning," "Based on the initial conclusion," or similar patterns (e.g., "根据之前的思路" in Chinese). The specific conclusion or reasoning attached to these phrases is the "inherited reasoning". Crucial Example:
+    - If a {subsequent thought} says: "Based on the previous reasoning, the most likely candidate is ENTITY_A."
+    - The "inherited reasoning" you must identify is the entire proposition: "The most likely candidate was ENTITY_A."
+2. Check for Omission: Verify if this "inherited reasoning" (e.g., the conclusion that "ENTITY_A was the most likely candidate") is already present or implied in the {new first thought}.
+3. Enrich if Necessary: If the "inherited reasoning" is missing, integrate it into the {new first thought}. Make minimum yet necessary changes to ensure the thought is logically complete. For example, if the "inherited reasoning" is "The most likely candidate was ENTITY_A", you should add discussion about why ENTITY_A may be related to the answer of the {question}.  
+
+The final {enriched new first thought} must adhere to the following principles:
+- Logical Coherence: It must clearly and logically explain the reasoning that leads from the {question} to the subsequent actions, including {first tool call} and {subsequent thoughts}.
+- Minimal Enrichment: Your changes to the original {new first thought} should be as minimal as possible. 
+- Language: It must be written in the same language as the {question}.
+- Don't include tool calls in the {thinking process}.
+
+
+## Input
+===question===
+{question_}
+===new first thought===
+{new_first_thought_}
+===first tool call===
+{first_tool_call_}
+===subsequent thoughts===
+{subsequent_thoughts_}
+
+## Output in the following format
+Analysis: {your analysis, following the above instructions} 
+Need Enrichment: {True of False}
+Enriched Thought: {The final, complete version of the thought. If no changes were needed, this will be identical to the original new first thought. in {language}}
+""".replace('{question_}', q).replace('{new_first_thought_}', refined_thinking_process).replace('{first_tool_call_}', tool_call).replace('{subsequent_thoughts_}', subsequent_thoughts_str).replace('{language}', language)
+
+
+    def ensure_format2(response, **kwargs):
+        if len(response.split('Enriched Thought:')) == 2 and 'Need Enrichment:' in response:
+            return response
+        else:
+            return False
+
     print('\n\n=====Original Thinking Process=====\n\n', thinking_content)
+    print('\n\n=====Original Subsequent Thoughts=====\n\n', subsequent_thoughts_str)
     print('\n\n=====Refined Thinking Process=====\n\n', refined_thinking_process)
-    messages[2]['content'] = refined_assistant_message
+
+    response = get_response([ensure_format2], model='claude-4-sonnet', messages=[{'role': 'user', 'content': sys_prompt}])
+    if response is None:
+        return 
+
+    _, enriched_thinking_process = response.split('Enriched Thought:')
+    need_enrichment = _.split('Need Enrichment:')[-1].strip(' \n').lower()
+    enriched_thinking_process = enriched_thinking_process.strip(' ')
+
+    if need_enrichment != 'true':
+        enriched_thinking_process = refined_thinking_process
+
+    if '===tool_call===' in enriched_thinking_process:
+        enriched_thinking_process = enriched_thinking_process.split('===tool_call===')[0]
+    elif  '<|FunctionCallBegin|>' in enriched_thinking_process:
+        enriched_thinking_process = enriched_thinking_process.split('<|FunctionCallBegin|>')[0]
+
+    final_assistant_message = '<think>' + enriched_thinking_process + '</think>' + tool_call
+
+    print('\n\n=====Final Thinking Process=====\n\n', final_assistant_message)
+    print('\n\n=====Full Enrich Response=====\n\n', response)
+    messages[2]['content'] = final_assistant_message
+
+    
     #print(json.dumps(messages, ensure_ascii=False,indent=2))
     
 
